@@ -50,6 +50,7 @@ typedef enum {
     BleCatFindMyDevice =
         5, /**< Google Find My Device network (0xFEAA): Pebblebee/Chipolo/Moto/Eufy */
     BleCatFlipper = 6, /**< Flipper Zero (recon multitool): advertised name "Flipper <name>" */
+    BleCatAxon = 7, /**< Axon body-worn / in-car police kit (SIG company id 0x034D) */
 } BleCat;
 
 /** Explicit, user-triggered actions for a validated BLE tracker. */
@@ -97,18 +98,52 @@ typedef enum {
 } EspLinkState;
 
 /**
- * Where NMEA comes from.
+ * Where the position comes from.
  *
  * Plenty of ESP32 carrier boards put the GPS module on the ESP itself rather
  * than on the Flipper's header, so the Flipper's UART can never see it and no
  * pin setting helps (issue #5). For those, the companion firmware relays each
  * sentence over the link it already has.
+ *
+ * The first two are NMEA from a real receiver. The third is not: it is a phone's
+ * own location, fetched over Unleashed's RPC location service (see gps_rpc.h).
+ * ORDER IS LOAD-BEARING -- these values are persisted in settings.txt as
+ * integers, so append only, never reorder.
  */
 typedef enum {
     ReconGpsSourceFlipper = 0, /**< default: a GPS wired to the Flipper's own UART */
     ReconGpsSourceCompanion, /**< relayed by the companion as `G,<nmea>` */
+    ReconGpsSourcePhone, /**< the paired phone's own fix, over the Unleashed RPC service */
     ReconGpsSourceCount,
 } ReconGpsSource;
+
+/**
+ * What the phone GPS source has managed to do this session.
+ *
+ * The companion relay got this treatment in v0.54 after issue #5 showed that one
+ * hollow "searching" badge standing in for four different faults costs four
+ * rounds of back-and-forth to diagnose. The RPC source has strictly more ways to
+ * fail than the relay does -- wrong firmware, no phone attached, permission
+ * denied, location switched off, or a fix so coarse it is worthless -- so it gets
+ * the same treatment up front rather than after the bug report.
+ *
+ * ReconGpsPhoneCoarse is the one with no NMEA equivalent: the phone IS answering,
+ * with a fused cell/Wi-Fi estimate kilometres wide. A receiver with no lock says
+ * so; a phone guesses. Reporting that as "searching" would be a lie the operator
+ * cannot see through.
+ */
+typedef enum {
+    ReconGpsPhoneOff = 0, /**< not selected, or never started */
+    ReconGpsPhoneUnsupported, /**< this .fap was built without the location service */
+    ReconGpsPhoneWaiting, /**< subscribed, nothing delivered yet */
+    ReconGpsPhoneNoClient, /**< no RPC session: nothing is paired, or the app is closed */
+    ReconGpsPhoneStreaming, /**< a usable fix has arrived */
+    ReconGpsPhoneCoarse, /**< answering, but every fix is outside the accuracy gate */
+    ReconGpsPhoneNoPermission, /**< the phone refused: location permission not granted */
+    ReconGpsPhoneDisabled, /**< the phone's location services are switched off */
+    ReconGpsPhoneNoFix, /**< the client cannot supply location at all (e.g. a desktop) */
+    ReconGpsPhoneError, /**< the client reported an error it did not classify */
+} ReconGpsPhoneState;
 
 /**
  * What the companion has said about its GPS relay this session.
@@ -267,6 +302,7 @@ typedef struct {
 
 typedef struct EspLink EspLink;
 typedef struct GpsLink GpsLink;
+typedef struct GpsRpc GpsRpc;
 typedef struct SigDb SigDb;
 
 typedef struct {
@@ -292,6 +328,7 @@ typedef struct {
 
     EspLink* esp;
     GpsLink* gps;
+    GpsRpc* gps_rpc; /**< phone GPS over the Unleashed RPC service; NULL unless selected */
     SigDb* sig_db; /**< SD-loaded extra signatures (NULL = built-ins only) */
 
     FuriMutex* mutex; /**< protects flock[] and gps_* snapshot */
@@ -331,6 +368,10 @@ typedef struct {
                            *  A flag, not a direct send: furi_hal_serial_tx from the
                            *  ESP worker would race the GUI thread's own commands on
                            *  the same handle. Same discipline as alert_pending. */
+
+    uint8_t gps_phone; /**< ReconGpsPhoneState. Written by the RPC callback under
+                         *   the mutex, read by the UI -- same discipline as the
+                         *   gps_* fix snapshot below. */
 
     bool gps_valid;
     float gps_lat;
@@ -401,6 +442,24 @@ typedef struct {
 
     DeauthTarget deauth[RECON_DEAUTH_MAX]; /**< BSSIDs seen under deauth attack */
     size_t deauth_count;
+
+    /**
+     * Net Guardian's GUARDED NETWORK, or "everything in range" when unset.
+     *
+     * Untargeted, the Guardian answers "is anything around me under attack?",
+     * which in a busy building is somebody else's problem most of the time. With
+     * a target set it answers "is MY network under attack?" -- only deauths aimed
+     * at this BSSID and evil twins of this SSID feed the score. Everything else
+     * (Flock, trackers, Flipper, attack tools) is unchanged: those are about the
+     * operator, not the network, and filtering them on a BSSID would be nonsense.
+     *
+     * The SSID is kept alongside the BSSID because an evil twin BY DEFINITION
+     * has a different BSSID -- matching a clone needs the name, and matching a
+     * deauth needs the address. Storing only one cannot express both.
+     */
+    uint8_t guard_bssid[6];
+    char guard_ssid[RECON_SSID_LEN];
+    bool guard_active; /**< false = guard everything in range (the default) */
 
     BleDevice ble[RECON_BLE_MAX]; /**< BLE devices / trackers */
     size_t ble_count;

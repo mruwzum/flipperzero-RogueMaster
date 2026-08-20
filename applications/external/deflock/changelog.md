@@ -1,11 +1,228 @@
 # Changelog
 
-## Unreleased
+## v0.73
 
-On `main` and in the [`nightly`](../../releases/tag/nightly) build. **Not tagged
-yet: the export below has not been run on hardware by anyone.**
+The v0.72 RogueMaster load failure is fixed.
+
+**Partly hardware-verified, for once.** Run on a Flipper Zero (Momentum
+`mntm-dev`, API 87.1) with the ESP32 companion attached: Net Guardian's network
+targeting was exercised end to end, and the v0.70 Detail-round-trip fix was
+confirmed on real hardware for the first time (a tagged tracker survived Back,
+and the device table grew 25 -> 28 rather than resetting). **The probe-rate gate
+below was NOT verified** -- it runs on the companion and the attached board is
+still on older firmware. See the note under that entry.
+
+### Fixed
+
+- **A T-Mobile hotspot was being reported as a likely ALPR camera.** Reported from
+  the field, and the cause is two-part.
+
+  First, the built-in OUI table is mostly **chip vendors, not Flock**. Checked
+  against the IEEE registry, 21 of its entries are registered to **Liteon**, and
+  only `b4:1e:52` belongs to Flock Safety itself. Two of them were worse: `48:27:ea`
+  is **Samsung Electronics** and `a4:cf:12` is **Espressif**, and upstream rates
+  both *"low confidence, WiGLE crowdsource"* — its weakest tier. Both are now
+  **demoted to `docs/signatures.seed.json`**, where you can opt back in. They are
+  not retracted; nothing says they are wrong, only that nobody corroborated them.
+
+  Second, and the general fix: the companion scored *Flock OUI + wildcard probe
+  request* as **Likely**, and a wildcard probe is the single most ordinary frame a
+  Wi-Fi client emits — it is what scanning for a network looks like. So any device
+  on shared silicon scored Likely for doing nothing at all. The companion now
+  requires a **sustained probe rate** before that rung: a fielded Flock camera runs
+  in station mode and probes roughly every **125 ms**, while a phone or hotspot
+  emits a short burst and then goes quiet for tens of seconds. Same frame, very
+  different cadence — the rate is what separates them.
+
+  The counter is keyed on the transmitter and updated *before* the sequence-run
+  coalescer, which deliberately suppresses repeats; counting after it would always
+  see one probe and the gate would reject real cameras too. The **silent-receiver**
+  path is deliberately left ungated — there the frame was sent *to* the Flock-OUI
+  device by someone else, so the cadence is the sender's and says nothing about the
+  receiver, and that path is upstream's key technique for catching a dormant camera.
+
+  **The thresholds are not field-tuned.** 125 ms is upstream's figure; the
+  client-side distribution has never been measured here, so they are set loosely to
+  clear the reported false positive without risking a real camera. The observed
+  count now rides the wire as `pr=<n>` and reaches the app as an observation —
+  never a confidence input — precisely so it can be tuned from real captures
+  instead of guessed at twice.
+
+  **BOTH HALVES NEED A COMPANION REFLASH**, and the demotion is the less obvious
+  one. The OUI table is compiled into the companion as well, so a board running
+  older firmware still matches `48:27:ea` and still reports it -- and the app
+  trusts the companion for every rung below Confirmed, because those depend on
+  probe behaviour it cannot re-derive. Updating the `.fap` alone will not clear
+  this false positive. Flash `flipdeflock_companion_esp32wroom.bin` from the same
+  release.
+
+  **Not verified on hardware.** The gate is companion-side and the board attached
+  during testing was on older firmware, so nothing exercised it. The thresholds
+  remain unmeasured guesses until someone runs a camera and a phone past it.
+
+- **Net Guardian can guard ONE network instead of everything in range.** Press
+  **Right** on the Guardian screen to pick an access point; the bottom line then
+  names it (`> MyNetwork`) instead of showing the `OK=sus` hint. The choice
+  persists, so a Flipper left next to a router comes back guarding the same
+  network.
+
+  Untargeted, the Guardian answers *"is anything around me under attack?"* — and
+  in a flat, an office or a hotel that is mostly somebody else's traffic. A
+  Guardian that lights up for the neighbours is one you learn to ignore, which is
+  precisely the alert fatigue the fused score was built to remove.
+
+  **Only the network-shaped inputs are filtered:** a deauth flood must be aimed at
+  the guarded BSSID, and an evil twin must clone the guarded SSID. Flock
+  detections, BLE trackers, a Flipper nearby and attack-tool signatures are about
+  the **operator**, not the network, so they keep contributing whatever is
+  targeted — filtering those on a BSSID would be meaningless.
+
+  The BSSID and the SSID are both stored because they answer different questions:
+  a deauth is attributed by address, while an evil twin *by definition* announces
+  the same name from a **different** address. Matching a twin on BSSID could never
+  fire. A target with no name (a hidden AP) simply never contributes the
+  evil-twin signal; deauth attribution still works for it. Changing the target
+  resets the score rather than carrying one earned against a different question.
+
+  **You can run the scan from inside the picker.** If no networks are listed yet,
+  a **Scan for networks** row runs one on the link the Guardian already holds and
+  the list fills in place — no leaving the screen and coming back. The row reads
+  `Scanning...` while the sweep is out and `Scan again` afterwards, and it says
+  `No ESP32 - check wiring` when there is no companion to ask.
+
+  The first cut showed `(no APs seen yet - run a scan)` instead, which was wrong
+  twice over: the submenu clipped it to `(no APs seen yet - run a s...` so the
+  instruction was cut off mid-word, and selecting the row did nothing anyway. Every
+  label on this screen is now short enough to render whole — a half-read
+  instruction is worse than none.
+
+  **Verified on hardware**, not just in CI: the picker opens on Right, an empty AP
+  list renders safely, the in-place scan was run and repopulated the list live, a
+  real AP was selected, the HUD showed `>Kestral` in place of the `OK=sus` hint,
+  the active target is marked with `*` on re-entry, hidden APs list as `(hidden)`,
+  and the choice round-tripped through `settings.txt` as `guard_bssid` +
+  `guard_ssid` and reloaded on restart.
 
 ### Added
+
+- **Axon Enterprise detection, as its own device class.** Axon makes body-worn and
+  in-car police equipment — Axon Body, Axon Fleet — and rows for it carry an `AX`
+  tag next to the confidence character, alongside the existing `ST` for
+  SoundThinking. Two identifiers, both taken from the issuing registry rather than
+  from anyone's list: the IEEE OUI **`00:25:df`** (*Axon Enterprise, Inc.*, their
+  only registration) and the Bluetooth SIG company id **`0x034D`**, filed under
+  their former name TASER International — the same pattern as Flock's `0x09C8`
+  sitting under the battery vendor XUNTONG.
+
+  **It is deliberately not folded into the ALPR class.** An Axon unit is not fixed
+  infrastructure: it moves with a person or a vehicle. The detail screen says "Axon
+  body/in-car kit" and the label is asserted by test to contain no word *camera*,
+  because the one thing this must never do is read like a camera on a pole.
+
+  **Registry-verified, never field-observed.** Nobody has captured an Axon device
+  using these on the air, and embedded products routinely expose the Wi-Fi *module*
+  vendor's OUI instead of the brand owner's — which is why most Flock hardware
+  appears as Liteon or Espressif rather than `b4:1e:52`. This may match every Axon
+  radio or none of them. An OUI-only hit caps at *Possible* exactly like every
+  other OUI; the BLE company id reaches *Confirmed*, as `0x09C8` does. There is
+  also a real duty-cycle limit: Axon's own docs say a body camera checks for a
+  known network every **15 minutes**, versus roughly every 125 ms for a Flock
+  camera, so you have to be listening in the right window.
+
+  Two traps are recorded in `docs/signatures.md` and pinned by tests. Searching a
+  vendor database for "axon" also returns *Axon Networks Inc* — an unrelated
+  networking company — plus Axona, Axonne, Interaxon, Maxon, Praxon, Paxonet and
+  Yaxon. And a curated "law enforcement OUI" list in circulation turned out to have
+  **11 of 15 prefixes wrong** when checked against IEEE: Apple filed as Digital
+  Ally, Nintendo as WatchGuard, General Motors and Samsung as Panasonic i-PRO,
+  Xiaomi and Dell as Getac, and Axis Communications as Flock Safety. Importing it
+  would have reported phones, consoles, cars and laptops as police equipment. Every
+  one of those prefixes is now asserted absent, so re-importing that list breaks
+  the build.
+
+### Fixed
+
+- **RogueMaster no longer fails at launch with `Missing Imports`.** The optional
+  phone-GPS calls are resolved only when the Phone source starts, so firmware
+  variants that share an API version without exporting that optional service can
+  load the app and report Phone GPS as unsupported instead.
+
+- **A stored Axon detection would not have survived a restart.** The `hits.csv`
+  parser bounded the device-class column at the old maximum, so a line carrying the
+  new class was rejected outright — the sighting would not have come back
+  mislabelled, it would not have come back at all. The bound is now a named
+  constant beside the field it guards, and every value the enum can hold is
+  round-tripped by test. Verified against the failing case: restoring the old bound
+  turns 16 checks red.
+
+- **API drift is now checked on the nightly, not only on push.** Unleashed shipped
+  `unlshd-091` (API 88.2 → 88.3) and nothing reported it, because the check lived
+  in the push-triggered workflow while the nightly — the job that actually rebuilds
+  against each firmware's live release channel — had no such step. Both now share
+  one composite action rather than two copies of the same 50 lines of shell.
+
+  **Nothing was broken by that bump.** The loader compares only the *major* API
+  version; the minor comparison is commented out in the firmware source, identically
+  on official firmware and Unleashed. README claimed the firmware refuses a `.fap`
+  "built against a different one", which overstated it and could have sent someone
+  hunting a problem that did not exist.
+
+### Changed
+
+- **Raven firmware 1.1.7 cannot be positively identified, and the README now says
+  so.** The Raven-specific Bluetooth services (`0x3100`–`0x3500`) that back the
+  "Flock Raven (audio)" label arrived in Raven firmware **1.2.0**. A unit still on
+  1.1.7 publishes only generic services — device information, health thermometer,
+  location and navigation — which millions of ordinary devices also publish.
+  Matching those would flag half the consumer electronics in range, so an older
+  Raven simply does not get the label.
+
+- **Troubleshooting explains why an OUI emulator shows two "missing" detections.**
+  Bench tools that replay Flock prefixes include `cc:cc:cc` and `f8:a2:d6`, both
+  retracted upstream and both deliberately unmatched here, so those two identities
+  producing nothing is the correct result rather than a miss.
+
+## v0.72
+**A retracted false-positive OUI came back and shipped in five releases. It is out
+again, and there is now a guard that would have caught it.**
+
+If you are running **v0.67 through v0.71**, that build scores an unrelated consumer
+device as a *Likely* ALPR camera on one prefix. Updating is worth it for that alone.
+
+**Not run on hardware.** As with everything since v0.20, this is verified by host
+tests, both compilers and the CI gates — not against a radio.
+
+### Added
+
+- **Phone GPS, on Unleashed firmware.** **Settings → GPS From → `Phone`** takes the
+  position from a paired phone over the firmware's RPC location service, for people
+  who have no GPS module. Needs Unleashed and the qUnleashed companion app paired
+  over BLE or USB. Requested in discussion #20.
+
+  **A phone is not the recommended source and is not the default.** A GPS module
+  only receives; a phone is a second radio-connected device tied to a subscriber
+  account and logged by the network, which is a poor trade for anyone using this
+  tool to avoid being tracked. README states the tradeoff plainly.
+
+  Fixes coarser than **100 m are rejected**, which has no equivalent on the NMEA
+  paths: a receiver without a lock reports no fix, while a phone answers with a
+  cell-tower estimate that looks identical to a real one. Pinning a camera two
+  kilometres out is worse than leaving it unpinned — precision over recall, applied
+  to position. A heading is kept only when the fix passed and the phone was actually
+  moving, since a stationary phone reports no bearing and 0 is indistinguishable
+  from due north.
+
+  Six new badge states, because the phone source has six ways to fail and one
+  hollow "searching" badge standing in for all of them is what made issue #5 take
+  four rounds: `!FW` no location service on this firmware · `!APP` nothing paired ·
+  `!PERM` permission denied · `!LOC` phone location off, or no receiver on the
+  paired device · `!ACC` answering but too coarse · `!ERR` companion fault.
+
+  Gated at compile time on `__has_include(<gps/gps.h>)`, so the official-firmware
+  and Momentum builds compile it to a no-op and keep linking — CI builds all three
+  from one tree and the service exists only in Unleashed's API 88.2. Verified by
+  building against all three SDKs and confirming the `gps_*` API imports are present
+  in the Unleashed image and absent from the other two.
 
 - **A redacted false-positive export.** **Reports → False Positive Report** writes
   a Markdown file you can attach to an issue without publishing where you were.
@@ -49,7 +266,71 @@ yet: the export below has not been run on hardware by anyone.**
 
 ### Fixed
 
+- **The retracted OUI `f8:a2:d6` is out of the detection tables again.** Upstream
+  withdrew it — *"low confidence; hit on a Sony Media Player"* — and it was dropped
+  for v0.44. It came back silently in `93beede` (2026-08-05), a commit about
+  *tightening* precision, which reflowed both OUI tables and reinstated the prefix in
+  the process. It shipped in **v0.67, v0.68, v0.69, v0.70 and v0.71**.
+
+  It was not harmless while it was there. A camera is scored *Likely* on a Flock OUI
+  plus a wildcard probe request — and every ordinary Wi-Fi client sends wildcard
+  probes while looking for networks. So a device on this prefix was reported as a
+  **Likely Flock/ALPR camera** for simply scanning for Wi-Fi. That is the same class
+  of false positive as the T-Mobile gateway that `93beede` was written to eliminate.
+
+  The tables now hold **31** prefixes, which is what both files' comments, the v0.44
+  changelog entry and `docs/signatures.md` had been claiming throughout.
+
+- **The OUI parity gate now checks more than parity, because parity was not enough.**
+  `tools/check_oui_parity.py` compared the app's table against the companion's and
+  nothing else. `93beede` changed **both files identically**, so the gate stayed green
+  at 32-vs-32 for five releases while both count comments still said 31 — the script
+  printed the contradicting number and had no rule to act on it. It now also fails on:
+
+  - a **count comment that disagrees with its own array**, and
+  - any **upstream-retracted prefix** reappearing in a built-in table — `f8:a2:d6`,
+    `6c:cd:d6`, `94:2a:6f`, `f4:e2:c6`, `cc:cc:cc`, `00:0c:e7`, each carrying its
+    retraction reason so it cannot be "rediscovered" from the older flat OUI list.
+
+  `test/test_flock_db.c` asserts the same denylist from the matcher side and pins the
+  table size. Both guards were verified against the failing case — the regression was
+  re-seeded in a throwaway copy outside the repo, and each guard was confirmed to fail
+  on its own, including with the count comments "corrected" to hide the first one.
+
+- **`signatures.example.json` no longer teaches users to reintroduce the
+  `Flock-Guest` bug.** The template shipped `"ssid_confirmed": ["flock-"]`, and
+  `docs/signatures.md` tells you to copy the file and edit it. User SSID needles are
+  matched as **unanchored substrings**, so that value marks `Flock-Guest`,
+  `Flock-Freight-WiFi` and similar benign networks **CONFIRMED** — precisely the
+  over-claim that the built-in `Flock-` rule was anchored to prevent in v0.47, reached
+  through a supported path instead. The app's re-derivation guard cannot catch it,
+  because it re-checks against the same matcher that is consulting your needle.
+
+  Both example values are now inert placeholders, matching how `aa:bb:cc` and
+  `deadbeef` already behaved, and `docs/signatures.md` carries an explicit warning
+  that `ssid_confirmed` is the one key where a user file can manufacture a false
+  CONFIRMED. Anything doubtful belongs in `ssid_likely`.
+
 - **Superseded CI runs are cancelled rather than queued.**
+
+### Changed
+
+- **The built-in OUI table now records what each prefix is actually resting on.** It
+  describes itself as prefixes *observed in fielded Flock Safety deployments*, which
+  is true of most but not all of it. `docs/signatures.md` gains a provenance table
+  separating Flock's own registered OUI, field-corroborated prefixes, four
+  contract-manufacturer prefixes that WatchFlock files separately as false-positive
+  prone (Liteon/USI), four inherited from the superseded flat list with no status in
+  the curated source at all, and three the curated source rates as weak. **No scoring
+  changes** — an OUI-only match still caps at *Possible* regardless of grade — this
+  only stops the table's own claim reading as stronger than the evidence.
+
+- **Signature sources re-checked against upstream.** No new Flock or SoundThinking
+  prefixes exist that this app lacks; coverage of published research is current. BLE
+  tells are unchanged and confirmed: XUNTONG company id `0x09C8`, the Raven GATT range
+  `0x3100`–`0x3500`, and the `Penguin-` / `FS Ext` naming. `e0:0a:f6` stays in
+  `docs/signatures.seed.json` rather than being promoted — its second source rates it
+  *lower*, not higher.
 
 ## v0.71
 **Nightly builds, so a fix can be tested before it is frozen into a tag.**

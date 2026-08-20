@@ -2,7 +2,9 @@
 // Copyright (c) 2026 ReconGrunt
 #include "recon_app_i.h"
 #include "helpers/esp_link.h"
+#include "helpers/esp_parser.h" // esp_hexval, for the guarded-BSSID setting
 #include "helpers/gps_link.h"
+#include "helpers/gps_rpc.h"
 #include "helpers/recon_report.h"
 #include "helpers/sig_db.h"
 #include "helpers/detect_rules.h"
@@ -451,10 +453,11 @@ void recon_app_ble_add(
     // into the Flock list (ftype 'L' = BLE) so it shows alongside WiFi hits,
     // gets geotagged, and lands in reports. (Done after releasing the mutex;
     // recon_app_report_flock takes it itself.)
-    if(cat == BleCatFlock) {
-        // Always ALPR-class: every BLE tell we match (0x09C8 battery, Penguin
-        // naming, Raven GATT) belongs to the Flock ecosystem. SoundThinking is a
-        // WiFi-side OUI match only -- no BLE signature for it is known.
+    if(cat == BleCatFlock || cat == BleCatAxon) {
+        // Flock tells (0x09C8 battery, Penguin naming, Raven GATT) are ALPR-class;
+        // Axon's own SIG company id is body/in-car kit, which is a different thing
+        // entirely and must not be reported as a camera on a pole. SoundThinking
+        // is a WiFi-side OUI match only -- no BLE signature for it is known.
         //
         // Re-derive the rung rather than asserting Confirmed. The companion also
         // sets cat=1 on a bare OUI-prefix match against SHARED silicon-vendor
@@ -469,7 +472,7 @@ void recon_app_ble_add(
             'L',
             flock_ble_confidence(company, name, raven_gatt),
             0,
-            FlockClassAlpr,
+            (cat == BleCatAxon) ? FlockClassBodycam : FlockClassAlpr,
             false);
     }
 }
@@ -751,21 +754,37 @@ void recon_app_watchscore_tick(ReconApp* app) {
     // requiring only a fresh DA target falsely raised WATCHFUL on benign traffic.
     // Gate on the per-interval rate clearing the flood threshold (the same bar
     // the live banner uses); the DA target then supplies recency + attribution.
+    //
+    // WITH A GUARDED NETWORK SET, only a flood aimed at THAT BSSID counts. In a
+    // flat or an office most deauth traffic in range is somebody else's, and a
+    // Guardian that lights up for the neighbours is one the operator learns to
+    // ignore -- the alert fatigue this fused score exists to remove.
     if(app->esp_deauths >= WATCH_DEAUTH_FLOOD_MIN) {
         for(size_t i = 0; i < app->deauth_count; i++) {
-            if((now - app->deauth[i].last_tick) <= WATCH_DEAUTH_FRESH_MS) {
-                in.deauth_active = true;
-                break;
+            if((now - app->deauth[i].last_tick) > WATCH_DEAUTH_FRESH_MS) continue;
+            if(app->guard_active && memcmp(app->deauth[i].bssid, app->guard_bssid, 6) != 0) {
+                continue;
             }
+            in.deauth_active = true;
+            break;
         }
     }
 
     // (4) An evil-twin / rogue AP (same SSID, mismatched security) of a network.
+    //
+    // Matched on SSID, not BSSID, and that is the point: a clone announces the
+    // guarded network's NAME from a different address. Comparing addresses would
+    // never fire, because a twin sharing the BSSID would not be a twin. A target
+    // with no name simply never contributes this signal -- deauth attribution
+    // still works for it.
     for(size_t i = 0; i < app->wifi_count; i++) {
-        if(app->wifi[i].rogue) {
-            in.rogue_ap = true;
-            break;
+        if(!app->wifi[i].rogue) continue;
+        if(app->guard_active &&
+           (app->guard_ssid[0] == 0 || strcmp(app->wifi[i].ssid, app->guard_ssid) != 0)) {
+            continue;
         }
+        in.rogue_ap = true;
+        break;
     }
 
     // (5) An active attack-tool signature the companion reported recently
@@ -881,6 +900,30 @@ void recon_settings_save(ReconApp* app) {
             app->settings.alert_mode,
             app->settings.alert_min_conf,
             app->settings.save_hits ? 1 : 0);
+
+        // The guarded network, appended only when one is set, so an untargeted
+        // install keeps exactly the file it has always had.
+        //
+        // A newline inside an SSID would corrupt the whole file, so such a target
+        // persists as BSSID-only: deauth attribution survives the restart and
+        // evil-twin matching resumes once it is re-picked. Losing one signal
+        // beats truncating the settings file. ('=' is fine -- the loader splits
+        // on the first one.)
+        if(app->guard_active) {
+            furi_string_cat_printf(
+                s,
+                "guard_bssid=%02x%02x%02x%02x%02x%02x\n",
+                app->guard_bssid[0],
+                app->guard_bssid[1],
+                app->guard_bssid[2],
+                app->guard_bssid[3],
+                app->guard_bssid[4],
+                app->guard_bssid[5]);
+            if(app->guard_ssid[0] && !strchr(app->guard_ssid, '\n') &&
+               !strchr(app->guard_ssid, '\r')) {
+                furi_string_cat_printf(s, "guard_ssid=%s\n", app->guard_ssid);
+            }
+        }
         storage_file_write(file, furi_string_get_cstr(s), furi_string_size(s));
         furi_string_free(s);
     }
@@ -888,7 +931,12 @@ void recon_settings_save(ReconApp* app) {
     storage_file_free(file);
 }
 
-static void recon_settings_apply_kv(ReconApp* app, const char* key, long val) {
+/**
+ * @param raw  the value text: everything after the FIRST '=' on the line. Two
+ *             settings are strings rather than numbers, and splitting on the
+ *             first '=' is what lets an SSID legally containing '=' round-trip.
+ */
+static void recon_settings_apply_kv(ReconApp* app, const char* key, long val, const char* raw) {
     if(strcmp(key, "backend") == 0)
         app->settings.backend = (val == EspBackendGeneric) ? EspBackendGeneric :
                                                              EspBackendCompanion;
@@ -926,6 +974,27 @@ static void recon_settings_apply_kv(ReconApp* app, const char* key, long val) {
         app->settings.alert_min_conf = (uint8_t)val; // ditto -- range-checked, not trusted
     else if(strcmp(key, "save_hits") == 0)
         app->settings.save_hits = (val != 0);
+    else if(strcmp(key, "guard_ssid") == 0) {
+        strncpy(app->guard_ssid, raw, RECON_SSID_LEN - 1);
+        app->guard_ssid[RECON_SSID_LEN - 1] = 0;
+    } else if(strcmp(key, "guard_bssid") == 0) {
+        // 12 hex chars, no separators. Anything else leaves the target INACTIVE
+        // rather than half-applied: guarding an address we misparsed would
+        // silently watch the wrong network, which is worse than watching all.
+        uint8_t b[6];
+        bool ok = strlen(raw) >= 12;
+        for(int i = 0; ok && i < 6; i++) {
+            int hi = esp_hexval(raw[i * 2]), lo = esp_hexval(raw[i * 2 + 1]);
+            if(hi < 0 || lo < 0)
+                ok = false;
+            else
+                b[i] = (uint8_t)((hi << 4) | lo);
+        }
+        if(ok) {
+            memcpy(app->guard_bssid, b, 6);
+            app->guard_active = true;
+        }
+    }
 }
 
 void recon_settings_load(ReconApp* app) {
@@ -945,7 +1014,7 @@ void recon_settings_load(ReconApp* app) {
             char* eq = strchr(line, '=');
             if(eq) {
                 *eq = '\0';
-                recon_settings_apply_kv(app, line, strtol(eq + 1, NULL, 10));
+                recon_settings_apply_kv(app, line, strtol(eq + 1, NULL, 10), eq + 1);
             }
             line = nl ? nl + 1 : NULL;
         }
@@ -1210,6 +1279,12 @@ static void recon_tick_event_callback(void* context) {
     // session sent). Doing that transmit on the worker thread would race this
     // thread's own commands on the same UART handle.
     recon_app_gps_cfg_tick(app);
+    // Phone GPS: re-ask for the location stream while it is not delivering. Same
+    // hoisted-to-the-dispatcher reasoning as the two above -- the ordinary case is
+    // that the operator opens a scan screen and connects the phone afterwards, and
+    // that must not need a per-scene call somebody forgets to add. A no-op when
+    // the phone source is not selected, and on firmware without the service.
+    gps_rpc_tick(app->gps_rpc);
     scene_manager_handle_tick_event(app->scene_manager);
 }
 

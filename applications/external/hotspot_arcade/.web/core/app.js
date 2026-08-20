@@ -26,12 +26,13 @@ function esc(s) {
 /* Which lobby `game` string maps to which top-level screen, and its title.
    The three duels share the single "duel" screen; the duel message's `kind`
    drives the actual board. */
-var SCREENS = ["landing", "lobby", "trivia", "duel", "draw", "pong", "wyr", "scramble", "react", "gc", "bs", "spectrum", "kmk", "chess", "secrets"];
+var SCREENS = ["landing", "lobby", "trivia", "duel", "draw", "pong", "wyr", "scramble", "react", "gc", "bs", "spectrum", "kmk", "chess", "secrets", "fillblank", "werewolf", "spyfall", "fd"];
 var GAME_SCREEN = {
   trivia: "trivia", connect4: "duel", tictactoe: "duel", dots: "duel",
   reversi: "duel", draw: "draw", pong: "pong",
   wyr: "wyr", scramble: "scramble", react: "react", gc: "gc", bs: "bs", spectrum: "spectrum", kmk: "kmk",
   chess: "chess", secrets: "secrets",
+  fillblank: "fillblank", werewolf: "werewolf", spyfall: "spyfall", frankendraw: "fd",
 };
 var GAME_LABEL = {
   trivia: "Trivia", connect4: "Connect 4", tictactoe: "Tic-Tac-Toe",
@@ -39,7 +40,26 @@ var GAME_LABEL = {
   wyr: "Would You Rather", scramble: "Word Scramble", react: "Reaction Duel",
   gc: "Guess the Color", bs: "Battleship", spectrum: "Spectrum", kmk: "Kiss Marry Kill",
   chess: "Chess", secrets: "Secrets",
+  fillblank: "Fill the Blank", werewolf: "Werewolf", spyfall: "Spyfall",
+  frankendraw: "Draw a Monster",
 };
+/* The switcher and the vote box must say the same name the game's own screen
+   says, in the same language -- "Fill the Blank" in the menu opening a screen
+   titled "Lückenfüller" reads as two different games. Localize through the
+   games' own title keys; a game with no key (the classic duels are proper
+   names anyway) keeps its GAME_LABEL. */
+var GAME_TITLE_KEY = {
+  trivia: "trivia.title", draw: "draw.title", wyr: "wyr.title",
+  scramble: "scr.title", react: "rc.title", gc: "gc.title", bs: "bs.title",
+  spectrum: "sp.title", kmk: "kmk.title", chess: "chess.title",
+  secrets: "secrets.title", fillblank: "fb.title", werewolf: "werewolf.title",
+  spyfall: "sf.title", frankendraw: "fd.title",
+};
+function gameLabel(name) {
+  var k = GAME_TITLE_KEY[name];
+  if (k) { var v = t(k); if (v && v !== k) return v; }
+  return GAME_LABEL[name] || name;
+}
 
 /* Show exactly one top-level screen. */
 function screen(name) {
@@ -276,11 +296,33 @@ A.packVote = function (cfg) {
 };
 
 // Countdown number with a per-second tick + pop animation.
+// The host pushes one frame per second of the countdown, and a phone that misses
+// them shows no digits at all -- it sits on the lobby and then jumps straight to
+// the round, because the next frame it receives is already the round. Three
+// seconds is a narrow window to be sure of three deliveries over a dozing radio.
+// So a frame starts a local tick instead of only painting once: whatever arrives
+// resyncs the number, and what is lost costs nothing. No extra traffic either
+// way, and the countdown stops on its own when the number runs out or the screen
+// it lives on goes away.
 A.countdown = function (numId, sec) {
   var n = $(numId);
-  n.textContent = sec;
-  A.sfx("tick"); A.vibe(10);
-  if (!noMotionPref()) { n.classList.remove("pop"); void n.offsetWidth; n.classList.add("pop"); }
+  if (A._cdTimer) { clearInterval(A._cdTimer); A._cdTimer = null; }
+  var cur = sec;
+  var paint = function () {
+    n.textContent = cur;
+    A.sfx("tick"); A.vibe(10);
+    if (!noMotionPref()) { n.classList.remove("pop"); void n.offsetWidth; n.classList.add("pop"); }
+  };
+  paint();
+  A._cdTimer = setInterval(function () {
+    // offsetParent is null once the countdown screen is hidden: the round started
+    // (or the game changed) and this tick has nothing left to say.
+    if (--cur < 1 || n.offsetParent === null) {
+      clearInterval(A._cdTimer); A._cdTimer = null;
+      return;
+    }
+    paint();
+  }, 1000);
 };
 
 // Final podium (avatar + rank + score). Returns the ranked list so the caller
@@ -377,6 +419,24 @@ function storeKey(name) {
   return h ? name + "_" + h : name;
 }
 
+/* Stable per-phone id so a returning player keeps their score even when iOS hands out a
+   fresh randomized Wi-Fi MAC (a "forget network" or OS change makes the phone look new to
+   the host). Generated once, kept in localStorage, and sent in every hello; the host keys
+   parked players on it instead of the MAC. */
+function clientId() {
+  try {
+    var k = storeKey("ha_cid"), v = localStorage.getItem(k);
+    if (!v) {
+      v = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem(k, v);
+    }
+    return v;
+  } catch (e) {
+    return "";
+  }
+}
+A.cid = clientId();
+
 /* Is the link actually alive? A socket that dies quietly -- the phone's WiFi drops,
    the host's AP goes away, the phone sleeps -- often produces no "close" event for a
    long time, so the page keeps looking connected and the player sits there waiting
@@ -393,18 +453,21 @@ function stopLiveness() {
   warned = false;
 }
 
+// Detect a link that has gone quiet and recover it fast. A half-open socket keeps
+// readyState 1 and never fires onclose on its own, so without this a dropped phone can hang
+// for minutes with no hint anything is wrong. Two stages: warn at WARN_MS (colour the dot,
+// raise the bar -- free), and close at DEAD_MS so onclose -> scheduleReconnect() actually
+// tears the dead link down. Reconnecting is safe now: the phone restores its own player by
+// its stable client id (clientId()/onHello), and a reconnect while a game-vote is open
+// RE-pushes the vote rather than dismissing it -- the host's pushAll short-circuits to the
+// vote while it is active, and the client no longer closes the overlay on stray traffic --
+// so the old "a reconnect ate the vote overlay" behaviour cannot recur.
 function startLiveness() {
   stopLiveness();
   lastRx = Date.now();
   liveTimer = setInterval(function () {
     if (!A.ws || A.ws.readyState !== 1) return;
     var quiet = Date.now() - lastRx;
-    // Two stages on purpose. Saying something at WARN_MS is free -- it only
-    // colours the dot and raises the bar, so a slow reply on a weak antenna
-    // costs nothing but a moment of honesty. Actually closing the socket is
-    // not free: the host drops the player on disconnect, and the reconnect
-    // comes back as a new one with no score, so that waits for DEAD_MS, by
-    // which point the link really is gone.
     if (quiet > DEAD_MS) {
       stopLiveness();
       try { A.ws.close(); } catch (e) {}   // onclose -> scheduleReconnect()
@@ -438,7 +501,7 @@ function connect() {
     setDot("");           // connected
     // Auto (re)join only if we already have a nickname. A first-time visitor
     // stays on the landing screen until they press Play.
-    if (A.joined) send({ t: "hello", nick: A.nick, avatar: A.avatar });
+    if (A.joined) send({ t: "hello", nick: A.nick, avatar: A.avatar, cid: A.cid });
   };
 
   ws.onmessage = function (ev) {
@@ -485,6 +548,17 @@ function maybeCaptive() {
 /* Core message routing. Game-specific messages hand off to registered
    handlers so the modules stay self-contained. */
 function dispatch(m) {
+  // Do NOT retire the vote overlay from here. Two attempts at that shipped broken: closing on
+  // anything that was not "gamevote" let the 2s keepalive's {t:"pong"} dismiss the prompt
+  // before it could be read, and closing on "the first real state push" made the prompt never
+  // appear on the other phones at all. Both were fixing a symptom of something else entirely
+  // (a duplicate SCREENS block that stopped the client from starting).
+  //
+  // The engine already makes this unnecessary: while a proposal is open it sends ONLY the vote
+  // (pushAll() returns early when _gvActive), so no game state can arrive mid-vote. Both
+  // outcomes then go through pushAll()'s normal path, which leads with lobbyJson() -- so
+  // onLobby() sees every resolution, approved or rejected. That is the one place that closes it.
+  notePlayerCount(m);   // the switcher greys out on the CURRENT count, not the last lobby's
   switch (m.t) {
     case "welcome":
       // The server owns identity: one phone is one player, recognised by its IP, so
@@ -614,7 +688,7 @@ function onLobby(m) {
   var gs = $("lobby-game-label");
   gs.textContent = g === "none"
     ? t("lobby.pick")
-    : (GAME_LABEL[g] || g) + " starting...";
+    : gameLabel(g) + " starting...";
 
   // If the host went back to the plain lobby, leave any game screen. Otherwise show
   // the shell of the chosen game; the game message fills in details. Route in whenever
@@ -626,6 +700,7 @@ function onLobby(m) {
   if (g === "none" && A.view !== "landing") route("lobby");
   else if (g !== "none" && GAME_SCREEN[g] && A.view !== "landing" && A.view !== GAME_SCREEN[g])
     route(GAME_SCREEN[g]);
+  else if (g !== "none" && A.view === "lobby" && known) route(GAME_SCREEN[g]);
 }
 
 /* Landing flow */
@@ -648,7 +723,7 @@ function startPlay() {
   A.initAudio();          // first gesture: unlock audio for the session
   A.sfx("start"); A.vibe(30);
   try { localStorage.setItem(storeKey("ha_nick"), n); localStorage.setItem(storeKey("ha_avatar"), A.avatar); } catch (e) {}
-  send({ t: "hello", nick: n, avatar: A.avatar, named: 1 });
+  send({ t: "hello", nick: n, avatar: A.avatar, named: 1, cid: A.cid });
   screen("lobby");
 }
 
@@ -718,7 +793,7 @@ function saveIdEdit() {
   setNick();
   A.sfx("start"); A.vibe(20);
   try { localStorage.setItem(storeKey("ha_nick"), n); localStorage.setItem(storeKey("ha_avatar"), A.avatar); } catch (e) {}
-  send({ t: "hello", nick: n, avatar: A.avatar, named: 1 });
+  send({ t: "hello", nick: n, avatar: A.avatar, named: 1, cid: A.cid });
   closeIdEdit();
 }
 
@@ -773,11 +848,63 @@ A.handlers.emoji = function (m) {
 // active one, then "Back to Lobby" as a separated last entry. Tapping an entry
 // proposes that switch; the ESP then pauses the active game and runs a majority
 // vote, pushing a {t:"gamevote"} overlay to every client until it resolves.
+/* What the switcher needs beyond a name. The minimums mirror the engine's own quorums
+   (FB_MIN_PLAYERS and friends) -- keep them in step, because offering a game the room is
+   too small for is exactly how "it just does not start" happens. GAME_DUEL marks the 1v1
+   games, which pair players off instead of playing as a group. */
+var GAME_MIN = { werewolf: 5, spyfall: 3, frankendraw: 3 };
+var GAME_DUEL = { connect4: 1, tictactoe: 1, dots: 1, reversi: 1, pong: 1, bs: 1, chess: 1 };
+function gameMin(name) { return GAME_MIN[name] || 2; }
+
+/* How many are in the room right now. A lobby push carries `players`; a game in progress
+   carries its roster under one of a few names, so take whichever arrived last -- the list
+   has to grey out on the CURRENT count, not the one from the last lobby. */
+A.nPlayers = 0;
+A.minOverride = false;   // host-side debug flag, echoed in the lobby push
+function notePlayerCount(m) {
+  var arr = m.players || m.p || m.scores || m.board;
+  if (arr && arr.length !== undefined) A.nPlayers = arr.length;
+  if (typeof m.minoverride === "boolean") {
+    A.minOverride = m.minoverride;
+    paintMinSwitch();
+  }
+}
+
+/* The testing switch at the bottom of the lobby. The host owns the flag -- we only ask it
+   to flip -- so two phones can never disagree about whether the minimums are off. */
+function paintMinSwitch() {
+  var b = $("test-min");
+  if (!b) return;
+  b.textContent = A.minOverride ? t("test.on") : t("test.off");
+  b.classList.toggle("on", !!A.minOverride);
+}
+
+// Small tag pill inside a switcher row: "(3+)", "1v1", or "2/5".
+function gameTag(cls, text) {
+  var sp = document.createElement("span");
+  sp.className = cls;
+  sp.textContent = text;
+  return sp;
+}
+
 function gameMenuItem(name, label, extraClass) {
   var b = document.createElement("button");
   b.type = "button";
   b.className = "game-item" + (extraClass || "");
   b.textContent = label;
+  // Say what a game needs, and refuse to offer it below that. The engine would reject the
+  // round anyway -- silently -- so the honest place to stop is here, before the vote.
+  var min = gameMin(name);
+  if (GAME_DUEL[name]) {
+    b.appendChild(gameTag("game-tag", "1v1"));
+  } else if (min > 2) {
+    b.appendChild(gameTag("game-tag", "(" + min + "+)"));
+    if (A.nPlayers < min && !A.minOverride) {
+      b.disabled = true;
+      b.classList.add("game-item-short");
+      b.appendChild(gameTag("game-tag short", A.nPlayers + "/" + min));
+    }
+  }
   b.addEventListener("click", function () {
     A.sfx("buzz"); A.vibe(12);
     send({ t: "proposeGame", game: name });
@@ -791,7 +918,7 @@ function openGameMenu() {
   list.innerHTML = "";
   Object.keys(GAME_LABEL).forEach(function (name) {
     if (name === A.curGame) return;   // the active game isn't a switch target
-    list.appendChild(gameMenuItem(name, GAME_LABEL[name]));
+    list.appendChild(gameMenuItem(name, gameLabel(name)));
   });
   // Leaving the current game is a change like any other, so it votes too. Nothing to
   // propose when we're already in the plain lobby -- the engine would refuse it.
@@ -808,7 +935,7 @@ function closeGameMenu() { hide("game-overlay"); }
 // The pretty label for a proposal target, including "none" (= the lobby).
 function gameVoteLabel(m) {
   if (m.game === "none") return t("gamevote.lobby_label");
-  return GAME_LABEL[m.label] || GAME_LABEL[m.game] || m.game;
+  return gameLabel(m.label !== undefined && GAME_LABEL[m.label] ? m.label : m.game);
 }
 
 A.gamevoteOpen = false;
@@ -938,6 +1065,13 @@ function initApp() {
   // Screen Wake Lock sentinels are auto-released when the tab hides; re-sync
   // (and re-request) whenever visibility flips back.
   document.addEventListener("visibilitychange", syncWakeLock);
+
+  var tm = $("test-min");
+  if (tm) tm.addEventListener("click", function () {
+    A.sfx("buzz"); A.vibe(10);
+    send({ t: "minoverride", on: !A.minOverride });   // the host answers with the new state
+  });
+  paintMinSwitch();
 
   connect();
   // Keepalive; also nudges the server to resend state after a doze.

@@ -68,6 +68,20 @@ typedef struct FSDState {
 
     // --- extras: read-only vehicle state (parsed from bus) ---
     uint8_t track_mode_state; // 0=unavail 1=avail 2=on (from 0x118)
+
+    // --- Track Mode inject (0x313 UI_trackModeSettings, opt-in adjustable) ---
+    // Modify the car's own 0x313 broadcast: request ON + handling balance,
+    // stability assist and cooling, then recompute the additive checksum. The
+    // byte6 counter is left untouched (we edit the car's frame in place). Master
+    // opt-in only — not gated on trim or the read-back track_mode_state, because
+    // the enable request works on non-Performance trims too.
+    bool track_mode_inject; // master opt-in, default OFF
+    uint8_t
+        track_rotation_pct; // Handling Balance 0-100 (low=understeer/stable, high=oversteer/rotation); default 100 (rear-biased / RWD-like)
+    uint8_t track_stability_pct; // Stability Assist 0-100; default 30 (safety margin + fun)
+    bool track_post_cooling; // UI_trackPostCooling, default false
+    bool track_cmp_overclock; // UI_trackCmpOverclock (max cooling), default false
+
     uint8_t traction_ctrl_mode; // 0..7 (from 0x118)
     uint8_t rear_defrost_state; // 0=sna 1=on 2=off (from 0x343)
     float vehicle_speed_kph; // from 0x257 DI_vehicleSpeed (12-bit, 0.08 factor, -40 offset)

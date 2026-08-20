@@ -1,11 +1,11 @@
 ## Main changes
-- Current API: 88.2
-* NFC: **Fix reading an EMV card with malformed TLV lengths crashing or overflowing buffers** - the poller trusted the card's own length bytes: some tags aborted the firmware through `furi_check`, others were copied straight into fixed-size fields (AID, application name/label, cardholder name, track 1/2), and the PAN/track-2 loops ran past their arrays. Lengths are now bounded against the destination, the PDOL is capped at what the poller can transmit, and rejected tags are logged (by @Endika | PR #1048)
-* NFC: **Fix a crafted EMV `.nfc` file corrupting the heap on load** - `emv_load()` used the file's own lengths as write sizes: three unbounded `strcpy`s into the cardholder name, application name and label, and `PAN length`/`AID length` read as 32-bit then written into 10- and 16-byte fields; an oversized `PAN length` also walked the card-number render loops past the array. Saving a card no longer writes a garbage `PIN try counter` either (by @mishamyte | PR #1056 | Fixes #1055)
-* NFC: **Fix "Unlock with Dictionary" destroying a saved MIFARE Classic dump** - pressing Skip while no card was on the reader adopted the dictionary poller's still-empty data as the loaded card, so the results screen offered to save a blank dump over the file. Saving under a different name did not help either, because renaming on save deleted the previously loaded file first (fixed separately below). The MIFARE Plus dictionary attack could lose data the same way and now merges its result instead of replacing (by @mishamyte | Fixes #1063)
-* NFC: **Fix "Update from Initial Card" dropping sectors from a MIFARE Classic dump** - the refresh replaced the dump with whatever that pass re-read instead of merging into it, so a sector that failed to authenticate this time lost both its key and its blocks. Recoverable through "Restore to Original State", but silent (by @mishamyte | Fixes #1064)
-* NFC, LF RFID, iButton: **Renaming a saved file no longer deletes it before the replacement is written** - all three apps unlinked the loaded file first, so a save that then failed (full SD, card pulled) left the user with neither copy. The new file is written first and the old one dropped only once it is safely on disk, a stale NFC shadow file can no longer override a fresh save, and a failed save no longer leaves the app pointing at a file that was never created. Note this protects renames; re-saving under the same name still writes over the only copy (by @mishamyte | Fixes #1065)
-* Apps: Build tag (**9aug2026**) - **Check out more Apps updates and fixes by following** [this link](https://github.com/xMasterX/all-the-plugins/commits/dev)
+- Current API: 88.4
+- JS Runner, NFC: **Fix some out of memory crashes**
+- OFW: NFC DESFire: **Fix crash when reading card with a zero-key application**
+- NFC: **Ultralight AES is no longer dictionary attacked automatically on read**
+- NFC: **Ultralight AES - closed the remaining card-lock (AUTHLIM) paths** (by @mishamyte | PR #1082 | Fixes #1081)
+- Apps: **Added categories for apps in firmware builds**, if you had apps that were moved to new subfolders in favourites, or on quick buttons, you will need to re-add them to favs/buttons
+- Apps: Build tag (**18aug2026p2**) - **Check out more Apps updates and fixes by following** [this link](https://github.com/xMasterX/all-the-plugins/commits/dev)
 ## Other changes
 * OFW PR 4361: fix HID limits to support international keyboards and add JP keyboard layout (by @d3npa)
 * OFW: CCID: move the debug app out of the firmware repository
@@ -68,7 +68,7 @@ UL: API: Add `canvas_get_buffer`, `canvas_get_buffer_size` to public API (by @xM
   - UL: USB/BT Remote: PTT improvements (by @hryamzik)
   - Ami Tool: Remove copyrighted names, write card fully using low level poller (by @Firefox2100)
   - CAN Tools: Parity with DBC format, support importing DBC files (by @MatthewKuKanich)
-  - ESP Flasher: Bump Marauder 1.12.1 (by @justcallmekoko) FlipperHTTP 2.1.1 (by @jblanked) Blackmagic 0.1.2-rc (by @hedger), advanced flashing mode (by @H4W9)
+  - ESP Flasher: Bump Marauder 1.14.3 (by @justcallmekoko) FlipperHTTP 2.1.1 (by @jblanked) Blackmagic 0.1.2-rc (by @hedger), quick flash fix (by @xMasterX), advanced flashing mode (by @H4W9)
   - ESP32 WiFi Marauder: Marauder 1.12.0 support (by @pfefferle), Marauder 1.10.0 support (by @justcallmekoko), Marauder 1.9.0 support (by @H4W9)
   - FlipLibrary: Added Fahrenheit, current weather, and wind speed/direction (by @H4W9)
   - FlipSocial: Autocomplete, keyboard improvements, explore and profile view enhancements, bugfixes (by @jblanked)
@@ -143,6 +143,8 @@ UL: API: Add `canvas_get_buffer`, `canvas_get_buffer_size` to public API (by @xM
   - UL: Fix "MIR" and other EMV cards crash on Read (by @Dmitry422)
   - OFW PR 4362: Fix BusFault in Write to Initial Card (by @akrylysov)
   - OFW PR 4369: Fix stack buffer overflows in MFUL FAST_READ and DESFire file settings parsers (by @qp-x-qp)
+- GUI: Optimize RAM usage of FileBrowser (by @WillyJL)
+- Archive: Fix wrong cursor when opening dirs with more than 220 files (by @WillyJL)
 - uFBT: Fix .clangd config for IDEs besides VSCode (by @WillyJL)
 - UL: Settings: Storage settings exit scenes properly if used via favourites (by @xMasterX)
 - UL: UI: Some small changes (by @xMasterX)

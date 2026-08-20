@@ -11,6 +11,7 @@ typedef struct {
     uint32_t read_speed, write_speed;
     uint32_t bytes_read, bytes_written;
     uint32_t update_time;
+    bool connection_error;
 } MassStorageModel;
 
 static void append_suffixed_byte_count(FuriString* string, uint32_t count) {
@@ -19,14 +20,27 @@ static void append_suffixed_byte_count(FuriString* string, uint32_t count) {
     } else if(count < 1024 * 1024) {
         furi_string_cat_printf(string, "%luK", count / 1024);
     } else if(count < 1024 * 1024 * 1024) {
-        furi_string_cat_printf(string, "%.1fM", (double)count / (1024 * 1024));
+        furi_string_cat_printf(string, "%.3fM", (double)count / (1024 * 1024));
     } else {
-        furi_string_cat_printf(string, "%.1fG", (double)count / (1024 * 1024 * 1024));
+        furi_string_cat_printf(string, "%.3fG", (double)count / (1024 * 1024 * 1024));
     }
 }
 
 static void mass_storage_draw_callback(Canvas* canvas, void* _model) {
     MassStorageModel* model = _model;
+
+    if(model->connection_error) {
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str_aligned(
+            canvas, canvas_width(canvas) / 2, 12, AlignCenter, AlignCenter, "USB Error");
+        canvas_set_font(canvas, FontSecondary);
+        canvas_draw_str_aligned(
+            canvas, canvas_width(canvas) / 2, 28, AlignCenter, AlignCenter, "Check your USB cable");
+        canvas_draw_str_aligned(
+            canvas, canvas_width(canvas) / 2, 42, AlignCenter, AlignCenter, "and try again");
+        elements_button_left(canvas, "Back");
+        return;
+    }
 
     canvas_draw_icon(canvas, 8, 14, &I_Drive_112x35);
 
@@ -34,28 +48,28 @@ static void mass_storage_draw_callback(Canvas* canvas, void* _model) {
     canvas_draw_str_aligned(
         canvas, canvas_width(canvas) / 2, 0, AlignCenter, AlignTop, "USB Mass Storage");
 
-    canvas_set_font(canvas, FontBatteryPercent);
+    canvas_set_font(canvas, FontSecondary);
     elements_string_fit_width(canvas, model->file_name, 89 - 2);
     canvas_draw_str_aligned(
-        canvas, 92, 24, AlignRight, AlignBottom, furi_string_get_cstr(model->file_name));
+        canvas, 50, 23, AlignCenter, AlignBottom, furi_string_get_cstr(model->file_name));
 
     furi_string_set_str(model->status_string, "R:");
     append_suffixed_byte_count(model->status_string, model->bytes_read);
     if(model->read_speed) {
-        furi_string_cat_str(model->status_string, "/");
+        furi_string_cat_str(model->status_string, "; ");
         append_suffixed_byte_count(model->status_string, model->read_speed);
-        furi_string_cat_str(model->status_string, "s");
+        furi_string_cat_str(model->status_string, "ps");
     }
-    canvas_draw_str(canvas, 14, 34, furi_string_get_cstr(model->status_string));
+    canvas_draw_str(canvas, 12, 34, furi_string_get_cstr(model->status_string));
 
     furi_string_set_str(model->status_string, "W:");
     append_suffixed_byte_count(model->status_string, model->bytes_written);
     if(model->write_speed) {
-        furi_string_cat_str(model->status_string, "/");
+        furi_string_cat_str(model->status_string, "; ");
         append_suffixed_byte_count(model->status_string, model->write_speed);
-        furi_string_cat_str(model->status_string, "s");
+        furi_string_cat_str(model->status_string, "ps");
     }
-    canvas_draw_str(canvas, 14, 43, furi_string_get_cstr(model->status_string));
+    canvas_draw_str(canvas, 12, 44, furi_string_get_cstr(model->status_string));
 }
 
 MassStorage* mass_storage_alloc() {
@@ -103,6 +117,16 @@ void mass_storage_set_file_name(MassStorage* mass_storage, FuriString* name) {
         MassStorageModel * model,
         { furi_string_set(model->file_name, name); },
         true);
+}
+
+void mass_storage_set_connection_error(MassStorage* mass_storage) {
+    with_view_model(
+        mass_storage->view, MassStorageModel * model, { model->connection_error = true; }, true);
+}
+
+void mass_storage_clear_connection_error(MassStorage* mass_storage) {
+    with_view_model(
+        mass_storage->view, MassStorageModel * model, { model->connection_error = false; }, false);
 }
 
 void mass_storage_set_stats(MassStorage* mass_storage, uint32_t read, uint32_t written) {

@@ -4,7 +4,7 @@
 #include <string.h>
 
 /**
- * 31 OUI prefixes observed in fielded Flock Safety deployments.
+ * 29 OUI prefixes observed in fielded Flock Safety deployments.
  * Mostly @NitekryDPaul research; 82:6b:f2 from DeFlockJoplin field testing;
  * the last entry b4:1e:52 is Flock Safety's own IEEE-registered OUI (GainSec).
  * These are generic vendor prefixes (Liteon, Espressif, etc.), hence OUI-only
@@ -17,28 +17,72 @@
  * table was originally imported from -- the flat list cannot record that a
  * prefix was later doubted, so re-importing from it silently undoes retractions.
  *
- * f8:a2:d6 was DROPPED 2026-07-27: upstream marks it Removed ("low confidence;
- * hit on a Sony Media Player"). Do NOT re-add it from the flat list. Also
- * retracted upstream and deliberately absent here: 6c:cd:d6 (Netgear),
- * 94:2a:6f + f4:e2:c6 (Ubiquiti), cc:cc:cc (no hits), 00:0c:e7 (possible FP).
+ * RETRACTED UPSTREAM -- never re-add any of these: f8:a2:d6 ("low confidence;
+ * hit on a Sony Media Player"), 6c:cd:d6 (Netgear), 94:2a:6f + f4:e2:c6
+ * (Ubiquiti), cc:cc:cc (no hits), 00:0c:e7 (possible FP). The flat list still
+ * carries some of them, which is exactly why re-importing from it is forbidden.
+ *
+ * f8:a2:d6 HAS BEEN REMOVED TWICE. Dropped 2026-07-27 for v0.44, then silently
+ * re-added by 93beede (2026-08-05) -- a commit about TIGHTENING precision -- while
+ * the table was reflowed, and it shipped in v0.67 through v0.71 scoring "Likely"
+ * on any wildcard probe. Nothing caught it: the parity gate compared this table
+ * against the sketch's and 93beede drifted BOTH sides identically, so 32-vs-32
+ * passed while both count comments still said 31. That recurrence is why
+ * tools/check_oui_parity.py now also checks the declared count and enforces a
+ * retracted-prefix denylist, and why test_flock_db.c asserts each one is absent.
+ * A comment is not a guard; treat the denylist as the real rule.
  *
  * This table is a claim of FIELD CORROBORATION. Uncorroborated candidates
  * belong in the user signature file, not here -- see docs/signatures.md.
  *
+ * PROVENANCE GRADES. The rows below are NOT uniform evidence, and the ordering
+ * is historical, so the grades are listed here rather than inline (the entries
+ * would have to be reordered to comment them per row, and reordering both files
+ * in lockstep is a worse risk than this list). Full table in docs/signatures.md.
+ *   - Contract manufacturer (Liteon/USI), shared with unrelated consumer gear:
+ *     f4:6a:dd, 00:f4:8d, d0:39:57, e8:d0:fc. WatchFlock files these separately
+ *     from direct-Flock prefixes and warns a MAC match alone may be a FP.
+ *   - Flat-list orphans, absent from the curated table in EVERY section (not
+ *     Active, not testing, not Removed): 70:08:94, 58:00:e3, 5c:93:a2, 64:6e:69.
+ *     Kept because absence is not retraction, but their status is unverifiable.
+ *   - Weak upstream confidence: 08:3a:88 ("BLE Ring conflict - unsure"). Does
+ *     NOT meet the field-corroboration bar this table's first line claims.
+ * Nothing here changes scoring: an OUI-only match caps at "possible" regardless.
+ *
+ * DEMOTED to docs/signatures.seed.json (v0.73): 48:27:ea and a4:cf:12. Upstream
+ * rates both "low confidence, WiGLE crowdsource" -- the weakest tier it has --
+ * and the IEEE registry says 48:27:ea belongs to SAMSUNG ELECTRONICS and
+ * a4:cf:12 to Espressif. Neither is Flock hardware; they are the chip vendors
+ * inside a great many phones, tablets and hotspots.
+ *
+ * That mattered in the field, not just on paper. The companion scores
+ * "Flock OUI + wildcard probe request" as LIKELY, and a wildcard probe is the
+ * single most ordinary frame a Wi-Fi client emits -- it is what scanning for
+ * networks looks like. So a Samsung-based T-Mobile hotspot doing nothing but
+ * looking for a network was reported as a likely ALPR camera. Same failure as
+ * the "tmobile-5416" gateway that killed bare-OUI-on-a-beacon scoring, one rung
+ * up the ladder. A user reported it; that is what got these two demoted and the
+ * probe-rate gate added on the companion side.
+ *
+ * Twenty-one of the prefixes below are registered to LITEON alone. Read the
+ * table as "chip vendors Flock buys from", not "Flock devices" -- only
+ * b4:1e:52 is registered to Flock Safety itself.
+ *
  * DUPLICATED in esp32_companion/flock_companion/flock_companion.ino, which
  * scores ESP-side. No shared header is possible (that side is an Arduino
- * sketch), so change BOTH and keep the row layout identical so they can be
- * diffed by eye. tools/check_oui_parity.py enforces this as a required CI gate.
+ * sketch), so change BOTH and keep the row layout identical -- EXACTLY four
+ * entries per row -- so they can be diffed by eye. tools/check_oui_parity.py
+ * enforces content parity as a required CI gate; the row layout is on you.
  */
 static const uint8_t flock_ouis[][3] = {
     {0x70, 0xc9, 0x4e}, {0x3c, 0x91, 0x80}, {0xd8, 0xf3, 0xbc}, {0x80, 0x30, 0x49},
     {0xb8, 0x35, 0x32}, {0x14, 0x5a, 0xfc}, {0x74, 0x4c, 0xa1}, {0x08, 0x3a, 0x88},
     {0x9c, 0x2f, 0x9d}, {0xc0, 0x35, 0x32}, {0x94, 0x08, 0x53}, {0xe4, 0xaa, 0xea},
-    {0xf4, 0x6a, 0xdd}, {0xf8, 0xa2, 0xd6}, {0x24, 0xb2, 0xb9}, {0x00, 0xf4, 0x8d},
-    {0xd0, 0x39, 0x57}, {0xe8, 0xd0, 0xfc}, {0xe0, 0x4f, 0x43}, {0xb8, 0x1e, 0xa4},
-    {0x70, 0x08, 0x94}, {0x58, 0x8e, 0x81}, {0xec, 0x1b, 0xbd}, {0x3c, 0x71, 0xbf},
-    {0x58, 0x00, 0xe3}, {0x90, 0x35, 0xea}, {0x5c, 0x93, 0xa2}, {0x64, 0x6e, 0x69},
-    {0x48, 0x27, 0xea}, {0xa4, 0xcf, 0x12}, {0x82, 0x6b, 0xf2}, {0xb4, 0x1e, 0x52},
+    {0xf4, 0x6a, 0xdd}, {0x24, 0xb2, 0xb9}, {0x00, 0xf4, 0x8d}, {0xd0, 0x39, 0x57},
+    {0xe8, 0xd0, 0xfc}, {0xe0, 0x4f, 0x43}, {0xb8, 0x1e, 0xa4}, {0x70, 0x08, 0x94},
+    {0x58, 0x8e, 0x81}, {0xec, 0x1b, 0xbd}, {0x3c, 0x71, 0xbf}, {0x58, 0x00, 0xe3},
+    {0x90, 0x35, 0xea}, {0x5c, 0x93, 0xa2}, {0x64, 0x6e, 0x69}, {0x82, 0x6b, 0xf2},
+    {0xb4, 0x1e, 0x52},
 };
 
 #define FLOCK_OUI_COUNT (sizeof(flock_ouis) / sizeof(flock_ouis[0]))
@@ -79,12 +123,77 @@ bool soundthinking_oui_match(const uint8_t* mac) {
     return false;
 }
 
+/**
+ * Axon Enterprise (formerly TASER International) body-worn and in-car police
+ * equipment.
+ *
+ * A THIRD DEVICE CLASS, and not fixed infrastructure at all: an Axon Body camera
+ * is worn by a person and an Axon Fleet unit rides in a vehicle. Both MOVE. A hit
+ * here must never be read as "a camera on that pole" -- that is why it gets its
+ * own class rather than joining flock_ouis[], and why the long label says
+ * "body/in-car", not "camera".
+ *
+ * 00:25:df is Axon Enterprise's IEEE OUI registration -- the ONLY one they hold.
+ * Verified directly against the IEEE registry, not taken from a list.
+ *
+ * DO NOT ADD PREFIXES BY SEARCHING A VENDOR DATABASE FOR "axon". That substring
+ * also matches Axon NETWORKS Inc (00:58:28, 00:c0:d4, 84:70:03 -- an unrelated
+ * networking company), Axona, Axonne, Interaxon, Maxon, Praxon, Paxonet and
+ * Yaxon. Twelve unrelated registrants, none of them police equipment.
+ *
+ * NOR FROM A CURATED "LAW ENFORCEMENT" OUI LIST. One such list was checked
+ * prefix-by-prefix against the IEEE registry and 11 of its 15 entries were wrong:
+ * it attributed Apple prefixes to Digital Ally, Nintendo to WatchGuard, General
+ * Motors and Samsung to Panasonic i-PRO, Xiaomi and Dell to Getac, and Axis
+ * Communications to Flock Safety. Two of its three "Axon / TASER" prefixes are
+ * really Honeywell Security and Nisca. Verify every prefix at the registry.
+ *
+ * FIELD STATUS: REGISTRY-VERIFIED, NEVER FIELD-OBSERVED. We have no capture of an
+ * Axon device using this prefix on the air. Embedded products frequently expose
+ * the Wi-Fi MODULE vendor's OUI instead of the brand owner's -- which is exactly
+ * why most Flock hardware appears as Liteon or Espressif rather than b4:1e:52. So
+ * this may match every Axon radio, or none of them. Scored accordingly: an
+ * OUI-only hit caps at "possible", same as every other OUI in this file.
+ *
+ * DUPLICATED in esp32_companion/flock_companion/flock_companion.ino and covered
+ * by the same tools/check_oui_parity.py gate as the other two tables.
+ */
+static const uint8_t axon_ouis[][3] = {
+    {0x00, 0x25, 0xdf},
+};
+
+#define AXON_OUI_COUNT (sizeof(axon_ouis) / sizeof(axon_ouis[0]))
+
+bool axon_oui_match(const uint8_t* mac) {
+    if(!mac) return false;
+    for(size_t i = 0; i < AXON_OUI_COUNT; i++) {
+        if(mac[0] == axon_ouis[i][0] && mac[1] == axon_ouis[i][1] && mac[2] == axon_ouis[i][2]) {
+            return true;
+        }
+    }
+    // Deliberately NOT extended by signatures.json, for the same reason
+    // soundthinking_oui_match() is not: the user schema has no class field, so a
+    // user OUI is always read as ALPR. Letting one silently become a body-camera
+    // detection would be a reinterpretation the file never asked for.
+    return false;
+}
+
 FlockDevClass flock_class_from_mac(const uint8_t* mac) {
-    return soundthinking_oui_match(mac) ? FlockClassAcoustic : FlockClassAlpr;
+    if(soundthinking_oui_match(mac)) return FlockClassAcoustic;
+    if(axon_oui_match(mac)) return FlockClassBodycam;
+    return FlockClassAlpr;
 }
 
 const char* flock_class_str(FlockDevClass cls) {
-    return (cls == FlockClassAcoustic) ? "Acoustic" : "ALPR";
+    switch(cls) {
+    case FlockClassAcoustic:
+        return "Acoustic";
+    case FlockClassBodycam:
+        return "Axon";
+    case FlockClassAlpr:
+    default:
+        return "ALPR";
+    }
 }
 
 const char* flock_class_long_str(FlockDevClass cls) {
@@ -92,7 +201,18 @@ const char* flock_class_long_str(FlockDevClass cls) {
     // screen's 128 px row. Shortened rather than truncated at draw time, so the
     // device class -- the thing that stops a gunshot sensor being read as a
     // camera -- is never the field that gets cut off.
-    return (cls == FlockClassAcoustic) ? "SoundThinking sensor" : "Flock / ALPR camera";
+    switch(cls) {
+    case FlockClassAcoustic:
+        return "SoundThinking sensor";
+    case FlockClassBodycam:
+        // "body/in-car" and NOT "camera": an Axon unit moves with a person or a
+        // vehicle, so the one thing this label must not do is read like a fixed
+        // pole. 20 chars, inside the same row budget as the string above.
+        return "Axon body/in-car kit";
+    case FlockClassAlpr:
+    default:
+        return "Flock / ALPR camera";
+    }
 }
 
 /**
@@ -293,10 +413,12 @@ FlockMethod flock_method_of(const uint8_t* mac, const char* ssid, char ftype, ui
     // so the label never claims more than the confidence rung does.
     if(flock_ssid_confidence(ssid) != FlockConfidenceNone) return FlockMethodSsid;
     if(flock_ie_fp_match(ie_fp) != FlockIeFpNone) return FlockMethodIeFp;
-    // Either table: a SoundThinking prefix is an OUI match too, just for the other
-    // device class. Reporting it as "unclassified" would hide the one indicator we
-    // actually have for an acoustic sensor.
-    if(flock_oui_match(mac) || soundthinking_oui_match(mac)) return FlockMethodOui;
+    // Any of the three tables: a SoundThinking or Axon prefix is an OUI match too,
+    // just for another device class. Reporting it as "unclassified" would hide the
+    // one indicator we actually have for those.
+    if(flock_oui_match(mac) || soundthinking_oui_match(mac) || axon_oui_match(mac)) {
+        return FlockMethodOui;
+    }
     // BLE is classified on the companion (mfg id 0x09C8 / Raven GATT) from advert
     // bytes that never reach this side, so name the source rather than guess.
     if(ftype == 'L') return FlockMethodBle;

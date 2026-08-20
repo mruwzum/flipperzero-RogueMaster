@@ -4,9 +4,10 @@
 
 # Hotspot Arcade
 
-[![build](https://github.com/tarikbc/hotspot-arcade/actions/workflows/build.yml/badge.svg)](https://github.com/tarikbc/hotspot-arcade/actions/workflows/build.yml)
-[![latest release](https://img.shields.io/github/v/release/tarikbc/hotspot-arcade?sort=semver)](https://github.com/tarikbc/hotspot-arcade/releases/latest)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![build](https://img.shields.io/github/actions/workflow/status/tarikbc/hotspot-arcade/build.yml?style=for-the-badge&color=ff8200)](https://github.com/tarikbc/hotspot-arcade/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/tarikbc/hotspot-arcade?sort=semver&style=for-the-badge&color=ff8200)](https://github.com/tarikbc/hotspot-arcade/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/tarikbc/hotspot-arcade/total?style=for-the-badge&color=ff8200)](https://github.com/tarikbc/hotspot-arcade/releases)
+[![license](https://img.shields.io/badge/license-MIT-ff8200?style=for-the-badge)](LICENSE)
 
 **Offline multiplayer party games hosted from a Flipper Zero + ESP32 WiFi board.**
 No internet, no app install. You host an open WiFi network from the Flipper; people
@@ -19,7 +20,7 @@ the rounds. The ESP32 board is the **referee**: it runs the WiFi access point, s
 the game to phones, and keeps the real-time game state. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Sixteen games, all phone-driven. Pick your emoji avatar on the way in and fire off emoji
+Twenty games, all phone-driven. Pick your emoji avatar on the way in and fire off emoji
 reactions that float up on everyone's screen mid-game.
 
 **Whole-group** (scale to everyone in the room, ready-up lobby, shared live leaderboard):
@@ -50,6 +51,39 @@ reactions that float up on everyone's screen mid-game.
   secretly predicts how many of the group said "yes". Only the total yes-count is ever
   revealed, never who answered what — an exact prediction scores 1, anything else 0.
   Six rounds. Questions are the secrets packs on the SD card, votable in the lobby.
+- **Fill the Blank** — a prompt card with a blank goes up; everyone but the rotating Czar
+  plays an answer card from their hand, and the played cards are shuffled and shown
+  anonymously for the Czar to judge. The winning card scores 1 and the Czar scores 1 too
+  for picking a real player's card — because every round also mixes in one answer card
+  drawn at random by the deck itself, and if the Czar falls for that one, nobody scores.
+  The reveal then shows every card with the player who played it. Six rounds. Inspired by
+  Cards Against Humanity; the cards shipped here are original and written for this
+  project. Prompts and answers are the fillblank packs on the SD card.
+- **Werewolf** — the social deduction classic, with the phones as referee: they deal the
+  secret roles (werewolves, a seer, a doctor from six players up, the rest villagers) and
+  run the clock, while the arguing happens out loud in the room. Night: the wolves converge
+  on a victim (their phones are the only way they can coordinate — no whispering), the seer
+  privately checks one player, and the doctor shields one, which can make the kill fail.
+  Day: the outcome is announced and the village votes someone out, role revealed — early on
+  a majority hammer, and a tied vote hangs nobody. Repeat until the wolves are gone or they
+  outnumber the village. Needs five players; no packs — the roles are code.
+- **Spyfall** — everyone at the table shares a secret location and holds a role there
+  (Beach: lifeguard, surfer, sunburnt tourist...) except one player, the spy, who is told
+  neither and only sees the list of possible locations. Read your card, then it goes away:
+  after that **Show my card** only reveals it while you hold the button. Six minutes of
+  questioning each other out loud, and the round ends the moment somebody dares to press
+  **I know the spy** (open to everyone, the spy included, as cover — get it wrong and
+  that's your one accusation gone) or **I know the location** (the spy's gamble). If the
+  clock runs out with nobody daring, the table goes round one seat at a time nominating a
+  suspect, and a nomination only sticks if everyone else backs it. Four rounds, rotating
+  spy. Locations are the spyfall packs on the SD card.
+- **Draw a Monster** — the exquisite-corpse drawing game. Everyone starts a sheet and draws
+  a head in the top third; the sheets then rotate one seat so somebody else adds a torso,
+  and rotate again for the legs — and all you ever see of the panel above yours is a
+  thin sliver to line up with. The finished creatures then walk past one at a time, each
+  band labelled with the player who drew it, and the room votes thumbs-up / thumbs-down
+  live as it watches; the best net score is crowned and shown again. The host keeps every
+  sheet as an SVG on the Flipper’s SD card. Needs three players. No packs.
 
 **1v1 duels** (challenge a player, many matches at once, rematch button, wins score on
 the Flipper leaderboard):
@@ -78,20 +112,20 @@ so adding a game is mostly a small module on each side.
 Pick a nickname and an emoji avatar, then land in the lobby:
 
 <p align="center">
-  <img src="docs/img/web-landing.png" alt="Landing screen: nickname entry and emoji avatar picker" width="19%">
-  <img src="docs/img/web-trivia-lobby.png" alt="Trivia lobby: ready up and vote a topic with live tallies" width="19%">
-  <img src="docs/img/web-trivia.png" alt="Trivia question with A/B/C/D tiles and a collapsible leaderboard" width="19%">
-  <img src="docs/img/web-trivia-reveal.png" alt="Trivia reveal: correct answer, per-option counts, live leaderboard" width="19%">
-  <img src="docs/img/web-trivia-final.png" alt="Trivia final podium" width="19%">
+  <img src="docs/img/web-landing.png" alt="Landing screen: nickname entry and emoji avatar picker" width="30%">
+  <img src="docs/img/web-trivia.gif" alt="Trivia: vote a topic in the lobby, answer A/B/C/D, then the reveal marks the correct answer with per-option counts and your points" width="30%">
+  <img src="docs/img/web-trivia-final.png" alt="Trivia final podium" width="30%">
 </p>
 
 The other phone games — the shared-lobby party games (Would You Rather, Word Scramble,
-Reaction Duel, Guess the Color), Draw &amp; Guess, and a real-time Pong (animated below):
+Reaction Duel, Secrets, Guess the Color, Spectrum, Kiss Marry Kill), Draw &amp; Guess, and a
+real-time Pong (animated below):
 
 <p align="center">
   <img src="docs/img/web-wyr.gif" alt="Would You Rather: A/B poll with the live vote split" width="19%">
-  <img src="docs/img/web-scramble.png" alt="Word Scramble: unscramble the letters and type the word" width="19%">
-  <img src="docs/img/web-react.png" alt="Reaction Duel: fastest finger with reaction time and leaderboard" width="19%">
+  <img src="docs/img/web-scramble.gif" alt="Word Scramble: six jumbled letters, type the word, then the answer is revealed" width="19%">
+  <img src="docs/img/web-react.gif" alt="Reaction Duel: wait on the red pad, tap the instant it turns green, then your reaction time" width="19%">
+  <img src="docs/img/web-secrets.gif" alt="Secrets: answer a yes/no question in private, guess how many of the group said yes, then only the total is revealed" width="19%">
 </p>
 <p align="center">
   <img src="docs/img/web-guesscolor.gif" alt="Guess the Color: dial in the swatch's RGB with a slider per channel, then the reveal" width="19%">
@@ -101,12 +135,21 @@ Reaction Duel, Guess the Color), Draw &amp; Guess, and a real-time Pong (animate
   <img src="docs/img/web-pong.gif" alt="Pong: real-time 1v1 rally with on-screen paddle controls" width="19%">
 </p>
 
+The social-deduction and party batch (Fill the Blank, Werewolf, Spyfall, Draw a Monster):
+
+<p align="center">
+  <img src="docs/img/web-fillblank.gif" alt="Fill the Blank: a prompt with a gap, a hand of answer cards, and the reveal naming every card" width="19%">
+  <img src="docs/img/web-werewolf.gif" alt="Werewolf: the werewolf picks a night victim, then the village votes a wolf out at dusk" width="19%">
+  <img src="docs/img/web-spyfall.gif" alt="Spyfall: the spy's card, the questioning options, and the reveal after the spy calls the location" width="19%">
+  <img src="docs/img/web-frankendraw.gif" alt="Draw a Monster: draw a head, carry on from the sliver, and the assembled creature reveal" width="19%">
+</p>
+
 The 1v1 board duels (Connect Four, Tic-Tac-Toe, Dots &amp; Boxes, Reversi, Battleship, Chess):
 
 <p align="center">
-  <img src="docs/img/web-connect4.png" alt="Connect Four: 7x6 board mid-game, your turn" width="19%">
-  <img src="docs/img/web-ttt.png" alt="Tic-Tac-Toe: 3x3 duel, your turn" width="19%">
-  <img src="docs/img/web-dots.png" alt="Dots &amp; Boxes: claimed boxes and live score" width="19%">
+  <img src="docs/img/web-connect4.gif" alt="Connect Four: challenge a player, then drop discs down the 7x6 board until four line up" width="19%">
+  <img src="docs/img/web-ttt.gif" alt="Tic-Tac-Toe: a 3x3 duel played out to a winning row" width="19%">
+  <img src="docs/img/web-dots.gif" alt="Dots &amp; Boxes: join dots edge by edge, closing a box claims it, with a live score per player" width="19%">
   <img src="docs/img/web-reversi.gif" alt="Reversi/Othello: 8x8 board with legal-move hints and disc counts" width="19%">
   <img src="docs/img/web-battleship.gif" alt="Battleship: place a fleet, then fire at the enemy grid with hits, misses, and sinks" width="19%">
   <img src="docs/img/web-chess.gif" alt="Chess: full FIDE rules with legal-move hints, blitz clocks, and a checkmate finish" width="19%">
@@ -268,11 +311,12 @@ On the Flipper: **Apps → GPIO → [ESP32] Hotspot Arcade**.
 
 ## Content packs
 
-Six games are content-driven from plain-text files under `packs/`, one directory per
-game (`trivia/`, `wyr/`, `scramble/`, `draw/`, `spectrum/`, `kmk/`). Format: `Key: value`
-lines, blocks split by `---` or a blank line, `Pack:` names the pack. The keys are per
-game — e.g. Trivia uses `Q:`, `A:`-`D:` and `Answer:`; Would You Rather uses `A:` / `B:`;
-Word Scramble and Draw &amp; Guess use `Word:`. Packs ship inside the .fap; drop your own
+Seven games are content-driven from plain-text files under `packs/`, one directory per
+game (`trivia/`, `wyr/`, `scramble/`, `draw/`, `spectrum/`, `kmk/`, `spyfall/`). Format:
+`Key: value` lines, blocks split by `---` or a blank line, `Pack:` names the pack. The
+keys are per game — e.g. Trivia uses `Q:`, `A:`-`D:` and `Answer:`; Would You Rather uses
+`A:` / `B:`; Word Scramble and Draw &amp; Guess use `Word:`; Spyfall uses `Loc:` plus one
+`R:` line per role. Packs ship inside the .fap; drop your own
 into `/ext/apps_data/hotspot_arcade/packs/<game>/` to add to them (yours win a name
 clash). See [packs/README.md](packs/README.md).
 

@@ -235,6 +235,17 @@ void haUartEvent(const String& json) {
 void haUartRoundResult(const String& json) {
     uartSend(HA_MSG_ROUND_RESULT, (const uint8_t*)json.c_str(), json.length());
 }
+// Finished artwork (Frankendraw). One frame per call -- a sheet header, a single line
+// segment, or the end marker -- so a whole drawing streams to the Flipper a segment at
+// a time and neither side ever buffers one. Payload is the op byte then the JSON.
+void haUartArt(uint8_t op, const String& json) {
+    uint8_t buf[192];
+    buf[0] = op;
+    size_t n = json.length();
+    if(n > sizeof(buf) - 1) n = sizeof(buf) - 1;
+    memcpy(buf + 1, json.c_str(), n);
+    uartSend(HA_MSG_ART, buf, 1 + n);
+}
 
 // Debug trace of the engine's identity decisions. Serial is the Flipper link, so a
 // log line shares the wire with the framed protocol: safe because the receiver only
@@ -280,6 +291,20 @@ public:
         // once; serving the bundle from flash to each copies into per-connection TCP buffers
         // and storms the heap, so those get a tiny landing instead.
         bool browser = request->header("User-Agent").indexOf("Mozilla") >= 0;
+        // HTTP caching: the bundle CRC is a strong ETag. A client that already holds this exact
+        // bundle revalidates with If-None-Match and gets a tiny 304 -- no 47 KB body -- so a
+        // reload or an iOS captive re-probe costs nothing instead of re-sending the whole
+        // bundle. The ETag changes when the host updates the bundle, so updates are never stale.
+        char etag[12] = "";
+        if(browser && fsReady && a && a->len) {
+            snprintf(etag, sizeof(etag), "\"%08lx\"", (unsigned long)assets.bundleCrc());
+            if(request->header("If-None-Match") == etag) {
+                AsyncWebServerResponse* nm = request->beginResponse(304);
+                nm->addHeader("ETag", etag);
+                request->send(nm);
+                return;
+            }
+        }
         File f;
         if(browser && fsReady && a && a->len) f = LittleFS.open(a->fsname, "r");
         if(!f) {
@@ -293,7 +318,8 @@ public:
         // Streamed from flash (no RAM copy). The stored name ends ".gz" while a->path does
         // not, so AsyncFileResponse sets Content-Encoding: gzip for us; mime is explicit.
         AsyncWebServerResponse* res = request->beginResponse(f, String(a->path), (const char*)a->mime);
-        res->addHeader("Cache-Control", "no-store");
+        res->addHeader("ETag", etag);
+        res->addHeader("Cache-Control", "no-cache");
         request->send(res);
     }
 };
@@ -308,7 +334,16 @@ static void onWsEvent(
     uint8_t* data,
     size_t len) {
     (void)srv;
-    if(type == WS_EVT_DISCONNECT) {
+    if(type == WS_EVT_CONNECT) {
+        // Every push is a whole snapshot -- pushAll() sends the lobby plus the full
+        // game state, never a delta -- so a frame that goes missing is repaired by
+        // the next one a moment later. The library's default trade is the opposite:
+        // when a client's send queue fills up it closes the connection. On a phone
+        // that dozed off for a second that is the difference between a stutter and
+        // losing your seat mid-round, and it looks to the room like a random drop.
+        // Discard the frame instead; the next push carries the same truth.
+        client->setCloseClientOnQueueFull(false);
+    } else if(type == WS_EVT_DISCONNECT) {
         ENGINE_LOCK();
         engine.onWsDisconnect(client->id());
         ENGINE_UNLOCK();
@@ -605,9 +640,13 @@ void loop() {
         // Identity beacon: magic + version + the CRC of the web bundle we hold in flash +
         // the current game id. Version flags an outdated board; the CRC lets the Flipper skip
         // re-streaming an unchanged bundle; the game id lets it mirror phone-vote game changes
-        // reliably. Bytes 6-10 are new in v19; older Flippers read only 0-5 and ignore the rest.
+        // reliably. Bytes 6-10 are new in v19; bytes 11-14 (free heap KB, free PSRAM KB, LE
+        // uint16 each) are new in v1.7.1 for the Flipper's memory readout. Older Flippers read
+        // only the bytes they know and ignore the rest, so growing this stays compatible.
         uint32_t bcrc = fsReady ? assets.bundleCrc() : 0;
-        uint8_t beacon[11] = {
+        uint16_t heapKb = (uint16_t)(ESP.getFreeHeap() / 1024);
+        uint16_t psramKb = (uint16_t)(ESP.getFreePsram() / 1024);
+        uint8_t beacon[15] = {
             HA_FW_MAGIC_0,
             HA_FW_MAGIC_1,
             HA_FW_MAGIC_2,
@@ -618,7 +657,11 @@ void loop() {
             (uint8_t)((bcrc >> 8) & 0xFF),
             (uint8_t)((bcrc >> 16) & 0xFF),
             (uint8_t)((bcrc >> 24) & 0xFF),
-            engine.activeGame()};
+            engine.activeGame(),
+            (uint8_t)(heapKb & 0xFF),
+            (uint8_t)(heapKb >> 8),
+            (uint8_t)(psramKb & 0xFF),
+            (uint8_t)(psramKb >> 8)};
         uartSend(HA_MSG_PING, beacon, sizeof(beacon));
     }
 }

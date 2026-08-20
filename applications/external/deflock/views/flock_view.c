@@ -47,7 +47,7 @@ static char confidence_char(FlockConfidence c) {
 typedef struct {
     char conf_ch;
     char ftype; /**< P/B/R/O/F/L -- 'L' is the BLE radio, everything else Wi-Fi */
-    bool acoustic; /**< SoundThinking sensor, not an ALPR -> "ST" tag on the row */
+    uint8_t dev_class; /**< FlockDevClass -> short "ST "/"AX " tag on the row */
     bool hidden; /**< beacons with no SSID -> "[hid]" instead of a blank name */
     char ssid[RECON_SSID_LEN];
     uint8_t mac[6];
@@ -164,12 +164,51 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
                           app->gps_relay == ReconGpsRelayUnknown && app->gps_cfg_tick &&
                           (furi_get_tick() - app->gps_cfg_tick) > furi_ms_to_ticks(4000);
 
+    // The phone (RPC) source's equivalent. It has strictly more ways to fail than
+    // either NMEA path -- the position comes from a separate device, over a link
+    // the app does not own, behind an OS permission -- and every one of them is
+    // fixable by the operator IF they are told which one it is. gps_rpc.c
+    // classifies; this only renders.
+    bool gps_phone = app->settings.gps_enabled && app->settings.gps_source == ReconGpsSourcePhone;
+    uint8_t phone = gps_phone ? app->gps_phone : (uint8_t)ReconGpsPhoneOff;
+
     // One place decides both the badge and the explanation, so the two can never
     // describe different faults.
     const char* fault_title = NULL;
     const char* fault_msg = NULL;
     const char* fault_fix = NULL;
-    if(gps_relay_mute) {
+    if(phone == ReconGpsPhoneUnsupported) {
+        fault_title = "!FW  no phone GPS";
+        fault_msg = "Needs Unleashed firmware.";
+        fault_fix = "Settings > GPS From";
+    } else if(phone == ReconGpsPhoneNoClient) {
+        fault_title = "!APP  not paired";
+        fault_msg = "No companion app linked.";
+        fault_fix = "Open qUnleashed, pair";
+    } else if(phone == ReconGpsPhoneNoPermission) {
+        fault_title = "!PERM  denied";
+        fault_msg = "Phone denied location.";
+        fault_fix = "Allow location on phone";
+    } else if(phone == ReconGpsPhoneDisabled) {
+        fault_title = "!LOC  turned off";
+        fault_msg = "Phone location is off.";
+        fault_fix = "Turn on phone location";
+    } else if(phone == ReconGpsPhoneNoFix) {
+        fault_title = "!LOC  no receiver";
+        fault_msg = "Paired device has no GPS.";
+        fault_fix = "Pair a phone, not a PC";
+    } else if(phone == ReconGpsPhoneCoarse) {
+        // Not "searching": the phone is answering, with a cell/Wi-Fi estimate too
+        // wide to place a camera with. Saying "searching" here would hide a fault
+        // that never resolves on its own.
+        fault_title = "!ACC  too coarse";
+        fault_msg = "Fix is over 100 m wide.";
+        fault_fix = "Move outside for sky view";
+    } else if(phone == ReconGpsPhoneError) {
+        fault_title = "!ERR  phone error";
+        fault_msg = "Companion reported a fault.";
+        fault_fix = "Reopen the companion app";
+    } else if(gps_relay_mute) {
         fault_title = "!FW  no GPS relay";
         fault_msg = "Companion never answered.";
         fault_fix = "Reflash: ESP32 Firmware";
@@ -224,7 +263,7 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
             FlockRowSnap* r = &rows[nrows++];
             r->conf_ch = confidence_char(e->confidence);
             r->ftype = e->ftype;
-            r->acoustic = (e->dev_class == FlockClassAcoustic);
+            r->dev_class = e->dev_class;
             r->hidden = e->hidden;
             strncpy(r->ssid, e->ssid, RECON_SSID_LEN - 1);
             r->ssid[RECON_SSID_LEN - 1] = '\0';
@@ -380,15 +419,48 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
         //   !PIN   the companion answered and refused that pin -- change ESP GPS Pin
         //   !FW    the companion never answered at all -- reflash it
         // The leading "!" is this app's existing warning mark (!DEAUTH, !r, !d).
-        if(gps_relay_mute) {
+        //   !APP   the phone source is selected but nothing is paired
+        //   !PERM  the phone denied location permission
+        //   !LOC   the phone's location is off, or it has no receiver at all
+        //   !ACC   the phone is answering, but too coarsely to place a camera
+        //   !ERR   the companion app reported a fault it did not classify
+        if(phone == ReconGpsPhoneUnsupported) {
+            snprintf(gps_str, sizeof(gps_str), "!FW");
+        } else if(phone == ReconGpsPhoneNoClient) {
+            snprintf(gps_str, sizeof(gps_str), "!APP");
+        } else if(phone == ReconGpsPhoneNoPermission) {
+            snprintf(gps_str, sizeof(gps_str), "!PERM");
+        } else if(phone == ReconGpsPhoneDisabled || phone == ReconGpsPhoneNoFix) {
+            snprintf(gps_str, sizeof(gps_str), "!LOC");
+        } else if(phone == ReconGpsPhoneCoarse) {
+            snprintf(gps_str, sizeof(gps_str), "!ACC");
+        } else if(phone == ReconGpsPhoneError) {
+            snprintf(gps_str, sizeof(gps_str), "!ERR");
+        } else if(gps_relay_mute) {
             snprintf(gps_str, sizeof(gps_str), "!FW");
         } else if(gps_relay_bad) {
             snprintf(gps_str, sizeof(gps_str), "!PIN");
         } else if(gps_busy) {
             snprintf(gps_str, sizeof(gps_str), "!PORT");
-        } else if(gps_valid) {
-            snprintf(gps_str, sizeof(gps_str), "GPS %d", gps_sats);
+        } else if(gps_valid && gps_sats > 0) {
+            // Clamped to two digits: the badge is laid out against a fixed width
+            // that the sub-line measures itself against, so an out-of-range count
+            // would push it off the right edge rather than just looking wrong.
+            // Both sources already bound this (NMEA at 64, RPC at 64), which is
+            // exactly why capping here costs nothing real.
+            snprintf(gps_str, sizeof(gps_str), "GPS %d", gps_sats > 99 ? 99 : gps_sats);
         } else {
+            // Either searching or locked-without-a-satellite-count; the FILL,
+            // decided below from gps_valid, is what separates them, so the text is
+            // the same either way.
+            //
+            // The count is printed only when it is real. A phone's fused location
+            // provider does not expose one (nor does an RMC-only receiver that
+            // never sends GGA), and the field is initialised to 0 -- so printing
+            // it unconditionally rendered a filled "GPS 0", which reads as a lock
+            // on zero satellites. That is a contradiction the operator has to stop
+            // and resolve mid-drive, from a badge whose whole job is to be read at
+            // a glance.
             snprintf(gps_str, sizeof(gps_str), "GPS");
         }
         gps_w = canvas_string_width(canvas, gps_str) + 4;
@@ -426,7 +498,14 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
         int x = 128 - w;
         // Fill for both "locked" and "misconfigured": a filled badge means "this
         // is settled, stop waiting for it" either way, and the glyph says which.
-        if(gps_valid || gps_busy || gps_relay_bad || gps_relay_mute) {
+        //
+        // Every phone-source state except Waiting is settled in that sense --
+        // including Coarse, where fixes ARE arriving and none of them will ever be
+        // good enough. Leaving that one hollow would say "still searching" about a
+        // condition that resolves only if the operator walks outside.
+        bool phone_fault = (phone != ReconGpsPhoneOff) && (phone != ReconGpsPhoneWaiting) &&
+                           (phone != ReconGpsPhoneStreaming);
+        if(gps_valid || gps_busy || gps_relay_bad || gps_relay_mute || phone_fault) {
             canvas_draw_box(canvas, x, 14, w, 10);
             canvas_set_color(canvas, ColorWhite);
         } else {
@@ -527,10 +606,16 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
         canvas_draw_str(canvas, 2, y + 8, cbuf);
         ui_icon_radio(canvas, 8, y + 1, r->ftype == 'L');
 
-        // "ST " marks a SoundThinking acoustic sensor. Untagged rows are ALPR
-        // cameras -- the common case stays as terse as it was, and the list never
-        // silently presents a gunshot sensor as a camera.
-        const char* cls = r->acoustic ? "ST " : "";
+        // "ST " marks a SoundThinking acoustic sensor, "AX " Axon body-worn or
+        // in-car police kit. Untagged rows are ALPR cameras -- the common case
+        // stays as terse as it was, and the list never silently presents a
+        // gunshot sensor or a body camera as a camera on a pole. Three chars each
+        // so the tagged and untagged rows still line up.
+        const char* cls = "";
+        if(r->dev_class == FlockClassAcoustic)
+            cls = "ST ";
+        else if(r->dev_class == FlockClassBodycam)
+            cls = "AX ";
 
         char line[48];
         if(r->ssid[0] != '\0') {

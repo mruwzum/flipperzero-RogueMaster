@@ -14,8 +14,8 @@ file per firmware family:
 |---|---|---|
 | Official (OFW) | `flipdeflock.fap` | 87.1 |
 | Momentum | `flipdeflock-momentum.fap` | 87.1 |
-| Unleashed | `flipdeflock-unleashed.fap` | 88.2 |
-| RogueMaster | `flipdeflock-unleashed.fap` | 88.2 |
+| Unleashed | `flipdeflock-unleashed.fap` | 88.3 |
+| RogueMaster | `deflock.fap` | 88.3 |
 
 "App is old" specifically means the app's API is BELOW the firmware's, which is what you
 get installing the OFW file on Unleashed or RogueMaster. The opposite message, asking you
@@ -78,6 +78,27 @@ Notes on the relay:
 Also worth knowing: detections are deliberately conservative. An OUI-only match reports
 as *Possible*, not *Confirmed*. Seeing fewer, better-qualified hits is the intended
 behaviour.
+
+**Testing with an OUI emulator? Two identities are supposed to be ignored.** Bench
+tools that replay Flock OUIs — [FlockDecoy](https://github.com/JakeSwiz/FlockDecoy) and
+similar — emulate `cc:cc:cc` and `f8:a2:d6`. Both were **retracted upstream** as false
+positives (`f8:a2:d6` was hitting a Sony Media Player), so FlipDeFlock deliberately does
+not match either. If your emulator cycles through them and those two rows never appear,
+that is the correct result, not a missed detection. See
+[`docs/signatures.md`](signatures.md) for the full retracted list.
+
+A bare OUI on a **beacon** is also ignored on purpose. Flock cameras moved to station
+mode around December 2025 — they send probe requests and do not beacon — so an OUI hit
+on a beacon is, by construction, some other product on the same silicon. An emulator
+that only beacons will produce fewer hits than one that also sends probe requests.
+
+**Still seeing a false positive after updating the app?** Update the **companion
+firmware** too. The OUI table and the probe-rate gate are compiled into the ESP32
+as well as the app, and the app deliberately trusts the companion for every
+confidence rung below *Confirmed* — those depend on probe behaviour it cannot
+re-derive on its own. So a board on older firmware keeps reporting a prefix the
+app has since dropped. Flash `flipdeflock_companion_esp32wroom.bin` from the same
+release as your `.fap`.
 
 ## GPS
 

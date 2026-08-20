@@ -12,12 +12,14 @@ typedef enum {
     MfUltralightAuthTypeManual,
     MfUltralightAuthTypeXiaomi,
     MfUltralightAuthTypeAmiibo,
+    MfUltralightAuthTypeUidReveal, // UL-AES: user-requested real-UID reveal (all-zero UIDRetrKey)
 } MfUltralightAuthType;
 
 typedef struct {
     MfUltralightAuthType type;
     MfUltralightAuthPassword password;
     MfUltralightC3DesAuthKey tdes_key;
+    MfUltralightAesKey aes_key;
     MfUltralightAuthPack pack;
 } MfUltralightAuth;
 
