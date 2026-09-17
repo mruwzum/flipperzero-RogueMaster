@@ -42,11 +42,25 @@ ones:
 Check **Settings → ESP Port** and **GPS Port**. Both can run at once, but not on the
 same UART.
 
-**Nothing appears in BLE Scan, Net Guardian, or Locator.** These three screens
-require **Companion** firmware and are blocked in Marauder mode — you should see an
-explicit notice saying so. Either flash the companion firmware (**ESP32 Firmware → Flash
-a .bin**, no computer needed) or use the screens Marauder mode supports: Flock/ALPR
-Detect, Flock Map, and Reports.
+**Nothing appears in the Locator.** It requires **Companion** firmware and is
+blocked in Marauder mode — you should see an explicit notice saying so. Either flash
+the companion firmware (**ESP32 Firmware → Flash a .bin**, no computer needed) or use
+the screens Marauder mode supports: Flock/ALPR Detect, Flock Map, and Reports.
+
+On **v0.95 and earlier this screen was broken outright**: the app's probe-survey
+poll cancelled Locator mode on the board within ten seconds of a hunt starting,
+and immediately when the Locator was opened from a detection. The symptom is a
+meter stuck on "acquiring signal..." or decaying to "out of range" and never
+recovering. Update both halves — the app *and* the companion firmware.
+
+**The Locator says "listening for target...".** That is not a connection error.
+While homing, the companion sends nothing but readings for the one device you
+picked, so until that device next transmits the app genuinely cannot tell a
+healthy link from an unpowered board. A camera sweeping channels lands on you
+roughly once every second or two; give it that long before assuming anything. If
+it never reads, check the board has power and tap its **RESET** — do *not* hold
+BOOT, which puts the ESP32 into the flash loader where the companion does not run
+at all.
 
 **GPS never gets a fix / the badge shows `!PORT`, `!PIN` or `!FW`.** These mean the app knows a fix is
 impossible with the current settings, rather than that it is still searching. Almost
@@ -147,9 +161,18 @@ Reboot the Flipper and try again without opening other screens first.
 
 ## Reports
 
-**No report file appears.** Reports only include detections you **marked**. Mark them
-first, then **Reports → Save Marked → Report**. Files land in
-`apps_data/flipdeflock/reports/`.
+**No report file appears.** `Export Marked (Redacted)` only includes detections you
+**marked**, so mark them first -- or use `Export All (Redacted)`, which takes every
+stored detection. Files land in `apps_data/flipdeflock/reports/`.
+
+**Which export should I send?** The redacted ones, always, unless you are keeping the
+file for yourself. They reduce each MAC to its OUI, drop the sighting time, your
+heading and your own labels, and replace any SSID that is not itself a Flock name
+with a shape (`AaaaAdd`) -- because a scan picks up every household network in range,
+and an SSID is frequently a surname or a street address that public wardriving
+databases can place on a map. Camera coordinates are kept; they are the point of the
+report. `Export All (RAW - private)` writes files suffixed `_RAW` and is the working
+copy for you, not something to attach to an issue or a map submission.
 
 **Save fails on a full session.** Reports stream row-by-row to the SD card, so memory
 isn't usually the limit — check free space on the SD card. If heap is genuinely too
@@ -157,9 +180,15 @@ tight, the save fails cleanly rather than crashing, and no empty file is left be
 
 ## Share to DeFlock
 
-**The QR won't scan.** It encodes a `https://deflock.org/?lat=…&lng=…` deep link and is
-rendered entirely offline — the Flipper never opens a connection. A detection with no GPS
+**The QR won't scan.** It encodes a `https://maps.deflock.org/?lat=…&lng=…&zoom=18` deep
+link and is rendered entirely offline — the Flipper never opens a connection. A detection with no GPS
 fix has no coordinates to share, so it won't produce a QR. Turn GPS on and re-detect.
+
+**The QR opens the DeFlock home page instead of the map.** That was a bug in v0.95 and
+earlier: the link pointed at `deflock.org`, which is the landing page and silently drops
+the coordinates. Fixed in v0.96. If you are on an older build, the coordinates are shown
+on the same screen and can be entered by hand at
+[deflock.org/report](https://deflock.org/report).
 
 ## Still stuck?
 

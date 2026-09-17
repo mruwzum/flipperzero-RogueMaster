@@ -7,25 +7,80 @@
 
 #include <gui/elements.h>
 
-#define ROW_H            11
-#define LIST_TOP         27
-#define VISIBLE_ROWS     3
+#define ROW_H        11
+#define LIST_TOP     27
+#define VISIBLE_ROWS 3
 // Deauth/disassoc frames per ~1s interval needed to call it a flood. Normal
 // roaming/idle churn is 1-2/s; a real flood is many. Below this we don't alert
 // (avoids false positives on benign disassoc churn).
-#define DEAUTH_FLOOD_MIN 5
 
 struct FlockView {
     View* view;
     FlockViewOkCallback ok_cb;
     void* ok_ctx;
+    FlockViewOkCallback hold_cb;
+    void* hold_ctx;
 };
 
 typedef struct {
     void* app; /**< ReconApp* */
-    int selected;
+    int selected; /**< DISPLAY position (index into order[]), not a table index */
     int top;
+    /* Newest-first display order: order[display_pos] = index into app->flock[].
+     * The table itself stays in first-seen order because other code (the store,
+     * the locator, the detail scene) addresses it by index; only the view
+     * reorders. Rebuilt every draw -- 64 entries, once per tick, is free. */
+    int order[RECON_FLOCK_MAX];
+    int order_count;
+    /* The cursor is anchored to a DEVICE, not a row number. With newest-first
+     * ordering a new hit lands at the top and pushes every row down; without
+     * this the selection would slide under the operator's finger, and Left on
+     * this screen is Delete. Cleared by Up/Down so a deliberate move wins. */
+    uint8_t sel_mac[6];
+    bool sel_valid;
+    int card_index; /**< row the live card points at, or -1. Written by the draw
+                      *  pass, read by OK, so the jump lands on the device that
+                      *  actually beeped rather than re-deriving it. */
 } FlockViewModel;
+
+/**
+ * Newest-first comparison. seen_epoch is wall clock and is written on EVERY live
+ * sighting as well as carried by entries restored from hits.csv, so it is the one
+ * key that orders live and archived rows against each other correctly. last_tick
+ * only breaks ties inside a session (and is 0 for a restored entry).
+ */
+static bool flock_row_newer(const FlockEntry* a, const FlockEntry* b) {
+    if(a->seen_epoch != b->seen_epoch) return a->seen_epoch > b->seen_epoch;
+    return a->last_tick > b->last_tick;
+}
+
+/** Rebuild order[] newest-first. Caller holds app->mutex. */
+static void flock_view_build_order(ReconApp* app, FlockViewModel* model) {
+    int n = (int)app->flock_count;
+    if(n > RECON_FLOCK_MAX) n = RECON_FLOCK_MAX;
+    for(int i = 0; i < n; i++)
+        model->order[i] = i;
+    // Insertion sort: n <= 64 and it runs once per draw, so the simple algorithm
+    // is the right one. Anything cleverer here would be harder to read for no
+    // measurable gain.
+    for(int i = 1; i < n; i++) {
+        int v = model->order[i];
+        int j = i - 1;
+        while(j >= 0 && flock_row_newer(&app->flock[v], &app->flock[model->order[j]])) {
+            model->order[j + 1] = model->order[j];
+            j--;
+        }
+        model->order[j + 1] = v;
+    }
+    model->order_count = n;
+}
+
+/** How long the "what just beeped?" card stays up, in ticks (ms), when
+ *  Settings -> Card dismiss is Auto. Raised from 3000: three seconds was not
+ *  long enough to read the rung, the device and the name while driving. With
+ *  Card dismiss set to "Next hit" this is ignored and the card holds until the
+ *  next detection replaces it. */
+#define CARD_MS 6000u
 
 static char confidence_char(FlockConfidence c) {
     switch(c) {
@@ -53,6 +108,9 @@ typedef struct {
     uint8_t mac[6];
     int8_t rssi;
     bool marked;
+    bool confirmed; /**< operator saw it -- shown as "+" so ground truth is visible
+                      *   on the row without opening anything */
+    char label[FLOCK_STORE_LABEL_LEN]; /**< operator's own name; wins over the SSID */
     bool selected;
     bool archived; /**< restored from hits.csv, not seen yet this session */
     uint32_t seen_epoch; /**< RTC seconds of that stored sighting (archived only) */
@@ -90,7 +148,7 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
 
     // ---- snapshot live data under the mutex; do ALL snprintf/canvas AFTER ----
     // Holding app->mutex across the whole canvas render stalls the ESP worker
-    // every frame; copy the scalars, the deauth attribution and the <=3 visible
+    // every frame; copy the scalars and the <=3 visible
     // rows into locals (cheap, no canvas/snprintf), release, then draw. Same
     // pattern as flock_map_view.c.
     FlockRowSnap rows[VISIBLE_ROWS];
@@ -109,7 +167,6 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
     uint32_t alerts = app->alert_fired;
     bool warn_dismissed = app->warn_dismissed;
     uint32_t reboots = app->esp_reboots;
-    uint32_t deauths = app->esp_deauths;
     bool proto_mismatch = app->esp_proto_mismatch;
     uint8_t proto_version = app->esp_proto_version;
     uint32_t dropped = app->esp_dropped_lines;
@@ -224,41 +281,53 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
 
     app->gps_fault_active = (fault_msg != NULL);
 
-    // Most-attacked BSSID + channel for the deauth header attribution.
-    bool have_attr = false;
-    uint8_t attr_ch = 0, attr_b3 = 0, attr_b4 = 0, attr_b5 = 0;
-    {
-        int top = -1;
-        uint32_t topc = 0;
-        for(size_t i = 0; i < app->deauth_count; i++) {
-            if(app->deauth[i].count > topc) {
-                topc = app->deauth[i].count;
-                top = (int)i;
-            }
-        }
-        if(top >= 0) {
-            DeauthTarget* t = &app->deauth[top];
-            have_attr = true;
-            attr_ch = t->channel;
-            attr_b3 = t->bssid[3];
-            attr_b4 = t->bssid[4];
-            attr_b5 = t->bssid[5];
-        }
-    }
+    // Auto-5V state, so the operator can see that the app is powering the board
+    // (it costs battery) or that it tried and could not (which is why nothing is
+    // happening). Read here under the lock with everything else.
+    bool otg_ours = app->otg_on_by_us;
+    bool otg_failed = app->otg_failed;
+
+    // "What just beeped?" card, filled at the end of this locked block.
+    bool card_active = false;
+    int card_index = -1;
+    char card_rung[16] = {0};
+    char card_what[32] = {0};
+    char card_who[40] = {0};
 
     // Clamp selection/scroll (touches only the view model) then copy the visible
     // rows, so the render loop below needs no lock.
+    flock_view_build_order(app, model);
     if(count > 0) {
-        if(model->selected >= (int)count) model->selected = count - 1;
-        if(model->selected < 0) model->selected = 0;
+        // Re-find the anchored device in the new order. If it is gone (deleted,
+        // or evicted from a full table) fall back to the old position so the
+        // cursor stays roughly where the operator left it.
+        int sel = -1;
+        if(model->sel_valid) {
+            for(int i = 0; i < model->order_count; i++) {
+                if(memcmp(app->flock[model->order[i]].mac, model->sel_mac, 6) == 0) {
+                    sel = i;
+                    break;
+                }
+            }
+        }
+        if(sel < 0) sel = model->selected;
+        if(sel >= model->order_count) sel = model->order_count - 1;
+        if(sel < 0) sel = 0;
+        model->selected = sel;
+        // Re-anchor to whatever is under the cursor now, so the next frame
+        // tracks this device even if newer hits arrive above it.
+        memcpy(model->sel_mac, app->flock[model->order[model->selected]].mac, 6);
+        model->sel_valid = true;
+
         if(model->selected < model->top) model->top = model->selected;
         if(model->selected >= model->top + VISIBLE_ROWS)
             model->top = model->selected - VISIBLE_ROWS + 1;
         if(model->top < 0) model->top = 0;
 
         for(int row = 0; row < VISIBLE_ROWS; row++) {
-            int idx = model->top + row;
-            if(idx >= (int)count) break;
+            int pos = model->top + row;
+            if(pos >= model->order_count) break;
+            int idx = model->order[pos];
             FlockEntry* e = &app->flock[idx];
             FlockRowSnap* r = &rows[nrows++];
             r->conf_ch = confidence_char(e->confidence);
@@ -270,10 +339,72 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
             memcpy(r->mac, e->mac, 6);
             r->rssi = e->rssi;
             r->marked = e->marked;
-            r->selected = (idx == model->selected);
+            r->confirmed = e->confirmed;
+            snprintf(r->label, sizeof(r->label), "%s", e->label);
+            r->selected = (pos == model->selected);
             r->archived = e->archived;
             r->seen_epoch = e->seen_epoch;
         }
+    }
+
+    // ---- "what just beeped?" card (discussion #7) -----------------------
+    // Composed here, under the lock we already hold, into fixed buffers -- the
+    // render pass below runs entirely unlocked, exactly like the row snapshots.
+    // CARD_MS is short on purpose: this is an answer to a sound that just
+    // played, not a dialog, and anything that lingers becomes something to swat
+    // away on every hit.
+    // Auto: the card ages out after CARD_MS. "Next hit": it holds until another
+    // detection overwrites alert_card_tick, so a hit found while you were
+    // watching the road is still on screen when you look down. Either way any
+    // key press dismisses it (see the input handler).
+    bool card_unexpired = app->settings.card_autodismiss ?
+                              ((uint32_t)(furi_get_tick() - app->alert_card_tick) < CARD_MS) :
+                              true;
+    if(app->alert_card_tick && card_unexpired) {
+        for(size_t i = 0; i < app->flock_count; i++) {
+            if(memcmp(app->flock[i].mac, app->alert_card_mac, 6) != 0) continue;
+            FlockEntry* e = &app->flock[i];
+            card_active = true;
+            card_index = (int)i;
+            snprintf(card_rung, sizeof(card_rung), "%s", flock_confidence_str(e->confidence));
+            // Vendor-aware, so the card cannot announce an Axon or Ubicquia
+            // unit as a Flock camera -- the same rule as the detail screen.
+            FlockVendor ven = flock_vendor_of(e->mac, e->ssid);
+            snprintf(
+                card_what,
+                sizeof(card_what),
+                "%s",
+                flock_device_long_str(ven, (FlockDevClass)e->dev_class));
+            // The name if it has one, else whatever identifies it best.
+            if(e->ssid[0]) {
+                snprintf(card_who, sizeof(card_who), "%s", e->ssid);
+            } else if(ven != FlockVendorUnknown) {
+                snprintf(
+                    card_who,
+                    sizeof(card_who),
+                    "%s %02X:%02X:%02X",
+                    flock_vendor_str(ven),
+                    e->mac[3],
+                    e->mac[4],
+                    e->mac[5]);
+            } else {
+                snprintf(
+                    card_who,
+                    sizeof(card_who),
+                    "%02X:%02X:%02X:%02X:%02X:%02X",
+                    e->mac[0],
+                    e->mac[1],
+                    e->mac[2],
+                    e->mac[3],
+                    e->mac[4],
+                    e->mac[5]);
+            }
+            break;
+        }
+        // Fell through without a match: the device was evicted from the table
+        // between the beep and this frame. Drop the card rather than draw a
+        // stale one -- there is nothing for OK to open.
+        if(!card_active) app->alert_card_tick = 0;
     }
 
     furi_mutex_release(app->mutex);
@@ -283,7 +414,7 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
     uint32_t now_epoch = furi_hal_rtc_get_timestamp();
 
     // ---- render from the snapshot (no mutex held) --------------------------
-    // Header / status bar. A real deauth flood takes over the header. Compact
+    // Header / status bar. Compact
     // right-aligned status for the inverted title bar.
     //
     // EVERY COUNTER APPEARS EXACTLY ONCE across the two header lines (issue #5):
@@ -295,9 +426,7 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
     // Channel is space-padded to a fixed 3 (1-14 / 36-165 / 6 GHz up to 233 on a
     // C5) so the right-aligned block stops jittering as the sweep hops.
     char right[16]; // fits "ch165 h999999" + NUL; snprintf truncates safely beyond
-    if(deauths >= DEAUTH_FLOOD_MIN) {
-        snprintf(right, sizeof(right), "!DEAUTH");
-    } else if(generic) {
+    if(generic) {
         snprintf(right, sizeof(right), "rx%lu", (unsigned long)lines);
     } else {
         snprintf(right, sizeof(right), "ch%3u h%lu", channel, (unsigned long)hits);
@@ -306,11 +435,11 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
 
     // Status sub-line: only what the title bar does NOT already show.
     // A wire-protocol version mismatch is the highest-priority health warning (the
-    // data may be mis-parsed), then a deauth flood. A non-zero dropped-line count
+    // data may be mis-parsed). A non-zero dropped-line count
     // (overlong RX lines) is appended as a "!dN" health suffix on the normal lines.
     char drop[16] = "";
     if(dropped) snprintf(drop, sizeof(drop), " !d%lu", (unsigned long)dropped);
-    char hdr[64]; // the non-icon variants (proto mismatch / deauth / Marauder)
+    char hdr[64]; // the non-icon variants (proto mismatch / Marauder)
     // The normal companion line is drawn as SEGMENTS, not one string, because two
     // of its fields are glyphs. Reusing the row icons rather than the letters
     // "rx" and "b" was a user's suggestion and it is strictly better: the same
@@ -323,18 +452,6 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
     char tail_s[40] = ""; // a<n> + optional !r<n> + optional !d<n>
     if(proto_mismatch) {
         snprintf(hdr, sizeof(hdr), "! Companion FW proto v%u mismatch", proto_version);
-    } else if(deauths >= DEAUTH_FLOOD_MIN) {
-        if(have_attr) {
-            snprintf(
-                hdr, sizeof(hdr), "!DEAUTH ch%u %02X%02X%02X", attr_ch, attr_b3, attr_b4, attr_b5);
-        } else {
-            snprintf(
-                hdr,
-                sizeof(hdr),
-                "%s DEAUTH! x%lu",
-                connected ? "ESP" : "...",
-                (unsigned long)deauths);
-        }
     } else if(generic) {
         // Companion status counters stay 0 on a Marauder board, so the title bar
         // carries the RX heartbeat there and the detection count belongs here.
@@ -418,7 +535,7 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
         //          held -- change GPS Port
         //   !PIN   the companion answered and refused that pin -- change ESP GPS Pin
         //   !FW    the companion never answered at all -- reflash it
-        // The leading "!" is this app's existing warning mark (!DEAUTH, !r, !d).
+        // The leading "!" is this app's existing warning mark (!r, !d).
         //   !APP   the phone source is selected but nothing is paired
         //   !PERM  the phone denied location permission
         //   !LOC   the phone's location is off, or it has no receiver at all
@@ -521,10 +638,12 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
     // The badge names what is wrong in five characters, which is all the header
     // has room for and is useless on its own: a user hit !PORT and said "I don't
     // know what it means and have no way of finding out." Naming a fault without
-    // saying what to do about it just relocates the confusion. The full reference
-    // lives in Help & Warnings; this is the pointer to it, at the moment it
-    // matters. Dismissed with OK, and only re-armed on a fresh scan session, so
-    // it never becomes something to swat away every frame.
+    // saying what to do about it just relocates the confusion, so the card
+    // carries the fix line itself. It used to end "see Help" instead -- a pointer
+    // to a screen that no longer exists, which is worse than no pointer: the
+    // reference now lives in docs/TROUBLESHOOTING.md, which costs no RAM.
+    // Dismissed with OK, and only re-armed on a fresh scan session, so it never
+    // becomes something to swat away every frame.
     if(fault_msg && !warn_dismissed) {
         canvas_set_color(canvas, ColorWhite);
         canvas_draw_box(canvas, 0, 26, 128, 38);
@@ -535,7 +654,35 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
         canvas_set_font(canvas, FontSecondary);
         ui_draw_str_fit(canvas, 3, 45, fault_msg, 125);
         ui_draw_str_fit(canvas, 3, 53, fault_fix, 125);
-        canvas_draw_str(canvas, 3, 62, "OK dismiss - see Help");
+        canvas_draw_str(canvas, 3, 62, "OK dismiss");
+        canvas_draw_line(canvas, 0, 24, 128, 24);
+        return;
+    }
+
+    // ---- "what just beeped?" card (discussion #7) -----------------------
+    // Drawn AFTER the fault panel returns above, so a GPS fault still wins the
+    // screen -- a card explaining a detection is not worth burying a message
+    // that says the scan itself is misconfigured.
+    //
+    // Deliberately a timed overlay and NOT a change to list ordering, which was
+    // the other option on the table. Sorting newest-first would move rows under
+    // a cursor whose selection is an INDEX, and Left on this screen is Delete:
+    // a row arriving while the operator reaches for it would silently retarget
+    // the delete at a different camera. The card answers the same question with
+    // no such hazard, and OK below jumps to the device so nothing is scrolled
+    // for anyway.
+    model->card_index = card_active ? card_index : -1;
+    if(card_active) {
+        canvas_set_color(canvas, ColorWhite);
+        canvas_draw_box(canvas, 0, 26, 128, 38);
+        canvas_set_color(canvas, ColorBlack);
+        canvas_draw_frame(canvas, 0, 26, 128, 38);
+        canvas_set_font(canvas, FontPrimary);
+        canvas_draw_str(canvas, 3, 36, card_rung);
+        canvas_set_font(canvas, FontSecondary);
+        ui_draw_str_fit(canvas, 3, 45, card_what, 125);
+        ui_draw_str_fit(canvas, 3, 53, card_who, 125);
+        canvas_draw_str(canvas, 3, 62, "OK opens - any key hides");
         canvas_draw_line(canvas, 0, 24, 128, 24);
         return;
     }
@@ -548,9 +695,11 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
             44,
             AlignCenter,
             AlignCenter,
-            connected ? "Scanning for ALPR..." :
-            port_busy ? "UART busy - check port" :
-                        "Connect ESP32...");
+            connected  ? "Scanning for ALPR..." :
+            port_busy  ? "UART busy - check port" :
+            otg_failed ? "5V refused - use USB" :
+            otg_ours   ? "5V on, waiting for ESP" :
+                         "Connect ESP32...");
         return;
     }
 
@@ -584,7 +733,11 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
             char meta[18];
             char age[8];
             flock_age_str(age, sizeof(age), now_epoch, r->seen_epoch);
-            snprintf(meta, sizeof(meta), "%s%s", r->marked ? "*" : "", age);
+            // "+" = the operator went and looked at this one. It is the only
+            // fact on the row that is not an inference, so it earns a mark of
+            // its own rather than being folded into "*".
+            snprintf(
+                meta, sizeof(meta), "%s%s%s", r->confirmed ? "+" : "", r->marked ? "*" : "", age);
             canvas_draw_str_aligned(canvas, 126, y + 8, AlignRight, AlignBottom, meta);
             text_max_x = 126 - canvas_string_width(canvas, meta) - 3;
         } else {
@@ -592,8 +745,13 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
                 // marked indicator just left of the bars
                 canvas_draw_str(canvas, 96, y + 8, "*");
             }
+            if(r->confirmed) {
+                // Left of the mark again, so a row can carry both without them
+                // overlapping or either one moving depending on the other.
+                canvas_draw_str(canvas, 89, y + 8, "+");
+            }
             ui_signal_bars(canvas, 104, y - 1, r->rssi); // cell ~104..114, baseline y+7
-            text_max_x = r->marked ? 94 : 102;
+            text_max_x = r->confirmed ? 87 : (r->marked ? 94 : 102);
         }
 
         // ---- left: confidence rung, radio glyph, then the name ---------------
@@ -606,20 +764,46 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
         canvas_draw_str(canvas, 2, y + 8, cbuf);
         ui_icon_radio(canvas, 8, y + 1, r->ftype == 'L');
 
-        // "ST " marks a SoundThinking acoustic sensor, "AX " Axon body-worn or
-        // in-car police kit. Untagged rows are ALPR cameras -- the common case
+        // "ST:" acoustic sensor, "AX:" body-worn police camera, "VG:" vendor
+        // gear of unknown kind, "DR:" unmanned aircraft. Untagged rows are ALPR
+        // cameras -- the common case
         // stays as terse as it was, and the list never silently presents a
         // gunshot sensor or a body camera as a camera on a pole. Three chars each
         // so the tagged and untagged rows still line up.
+        // Colon, not a space, after each tag. With a space "VG PLaybaLL" was read
+        // off a real drive as a device NAMED "VG Play Ball" -- the tag ran into the
+        // SSID. Still three characters, so tagged and untagged rows keep lining up.
         const char* cls = "";
         if(r->dev_class == FlockClassAcoustic)
-            cls = "ST ";
+            cls = "ST:";
         else if(r->dev_class == FlockClassBodycam)
-            cls = "AX ";
+            cls = "AX:";
+        else if(r->dev_class == FlockClassGear)
+            // Vendor-exclusive competitor kit, make unknown. Untagged would mean
+            // "ALPR camera" by the rule above, and these prefixes carry hand-held
+            // radios and building cameras as well as plate readers -- the same
+            // reason ST and AX exist. Spelled out in Help under ROW MARKS.
+            cls = "VG:";
+        else if(r->dev_class == FlockClassDrone)
+            // An aircraft. This was MISSING when the drone class landed, so every
+            // Remote ID detection rendered untagged -- which by the rule above
+            // means "ALPR camera", i.e. the list announced a passing drone as a
+            // camera on a pole. Exactly the over-claim ST/AX/VG exist to prevent.
+            cls = "DR:";
 
         char line[48];
-        if(r->ssid[0] != '\0') {
-            snprintf(line, sizeof(line), "%s%s", cls, r->ssid);
+        if(r->label[0] != '\0') {
+            // The operator's own name wins. They set it precisely because the
+            // observed name was not what they wanted to read here; the SSID is
+            // still on the detail screen and in every report.
+            snprintf(line, sizeof(line), "%s%s", cls, r->label);
+        } else if(r->ssid[0] != '\0') {
+            // ">" means "this device is LOOKING FOR that network", which is what a
+            // probe request's SSID actually is. Without it, a phone hunting its
+            // home wifi reads as an ALPR camera named after someone's router --
+            // exactly how a real drive's list got misread. A camera probes with no
+            // name at all, so a ">" row is evidence against it being one.
+            snprintf(line, sizeof(line), "%s%s%s", cls, r->ftype == 'P' ? ">" : "", r->ssid);
         } else if(r->hidden) {
             // We watched this one beacon without a name. Worth surfacing, but it
             // is an observation only -- the conf char is unchanged by it. Drops
@@ -627,17 +811,44 @@ static void flock_view_draw_callback(Canvas* canvas, void* _model) {
             snprintf(
                 line, sizeof(line), "%s[hid] %02X:%02X:%02X", cls, r->mac[3], r->mac[4], r->mac[5]);
         } else {
-            snprintf(
-                line,
-                sizeof(line),
-                "%s%02X:%02X:%02X:%02X:%02X:%02X",
-                cls,
-                r->mac[0],
-                r->mac[1],
-                r->mac[2],
-                r->mac[3],
-                r->mac[4],
-                r->mac[5]);
+            // NO SSID. This row used to be a bare 17-character MAC, which is the
+            // least readable thing on the screen and says nothing an operator can
+            // act on -- reported directly by the maintainer: "the first option
+            // that came up is a MAC address and I don't know what it means."
+            //
+            // We now know the vendor for most of these (that is what the OUI
+            // matched in the first place), so lead with it and keep only the last
+            // three bytes to tell two units of the same make apart. "Flock
+            // 00:00:02" answers the question the row is actually being read for;
+            // "B4:1E:52:00:00:02" makes the operator do the lookup themselves.
+            //
+            // Falls back to the full MAC when no vendor table matched, because
+            // then the hex genuinely IS everything we know -- printing a friendly
+            // label there would be inventing one.
+            FlockVendor ven = flock_vendor_of(r->mac, r->ssid);
+            if(ven != FlockVendorUnknown) {
+                snprintf(
+                    line,
+                    sizeof(line),
+                    "%s%s %02X:%02X:%02X",
+                    cls,
+                    flock_vendor_str(ven),
+                    r->mac[3],
+                    r->mac[4],
+                    r->mac[5]);
+            } else {
+                snprintf(
+                    line,
+                    sizeof(line),
+                    "%s%02X:%02X:%02X:%02X:%02X:%02X",
+                    cls,
+                    r->mac[0],
+                    r->mac[1],
+                    r->mac[2],
+                    r->mac[3],
+                    r->mac[4],
+                    r->mac[5]);
+            }
         }
         // Measured trim, not a hoped-for fit: the glyph cost the name ~7 px, and a
         // full 32-char SSID never fitted in the first place. Both used to be drawn
@@ -651,13 +862,91 @@ static bool flock_view_input_callback(InputEvent* event, void* context) {
     FlockView* fv = context;
     bool handled = false;
 
+    // A HOLD is its own gesture and MUST be handled before the block below.
+    // That block gates on `InputTypeShort || InputTypeRepeat`, so a branch
+    // nested inside it that tests for InputTypeLong can never match -- which is
+    // exactly where this lived in v0.83, making every action behind the hold
+    // (mark confirmed, rename, delete) unreachable on a real device while the
+    // code read as though it worked. Kept at the top level so the compiler
+    // cannot quietly strand it again.
+    //
+    // Deliberate actions live behind a hold so the fast keys stay fast: tap-OK
+    // opens the detail screen and Left deletes, both used while driving. Maps
+    // the display position back to a table index exactly as the short press does.
+    if(event->key == InputKeyOk && event->type == InputTypeLong) {
+        int hold_idx = -1;
+        with_view_model(
+            fv->view,
+            FlockViewModel * model,
+            {
+                if(model->selected >= 0 && model->selected < model->order_count) {
+                    hold_idx = model->order[model->selected];
+                }
+            },
+            false);
+        if(hold_idx >= 0 && fv->hold_cb) fv->hold_cb(fv->hold_ctx, hold_idx);
+        return true;
+    }
+
     if(event->type == InputTypeShort || event->type == InputTypeRepeat) {
+        // The card owns the FIRST press while it is up. OK jumps to the device
+        // that beeped and opens it -- which is the whole point, since the row
+        // it lands on is the one that would otherwise have to be found by
+        // scrolling. Any other key just hides the card and is NOT swallowed
+        // beyond that, so a press meant for the list costs at most one tap.
+        {
+            ReconApp* app = NULL;
+            int card_idx = -1;
+            with_view_model(
+                fv->view,
+                FlockViewModel * model,
+                {
+                    app = model->app;
+                    card_idx = model->card_index;
+                },
+                false);
+            if(app && card_idx >= 0) {
+                furi_mutex_acquire(app->mutex, FuriWaitForever);
+                bool live = app->alert_card_tick != 0;
+                app->alert_card_tick = 0; // dismissed either way
+                furi_mutex_release(app->mutex);
+                if(live) {
+                    with_view_model(
+                        fv->view, FlockViewModel * model, { model->card_index = -1; }, true);
+                    if(event->key == InputKeyOk) {
+                        // card_index is a TABLE index. Anchor the cursor by that
+                        // device's MAC and let the next draw place it, rather
+                        // than writing a table index into a display position.
+                        with_view_model(
+                            fv->view,
+                            FlockViewModel * model,
+                            {
+                                ReconApp* a2 = model->app;
+                                if(a2) {
+                                    furi_mutex_acquire(a2->mutex, FuriWaitForever);
+                                    if(card_idx < (int)a2->flock_count) {
+                                        memcpy(model->sel_mac, a2->flock[card_idx].mac, 6);
+                                        model->sel_valid = true;
+                                    }
+                                    furi_mutex_release(a2->mutex);
+                                }
+                            },
+                            true);
+                        if(fv->ok_cb) fv->ok_cb(fv->ok_ctx, card_idx);
+                    }
+                    return true;
+                }
+            }
+        }
         if(event->key == InputKeyUp) {
             with_view_model(
                 fv->view,
                 FlockViewModel * model,
                 {
                     if(model->selected > 0) model->selected--;
+                    // A deliberate move re-anchors to whatever is now under the
+                    // cursor; the next draw writes sel_mac from this position.
+                    model->sel_valid = false;
                 },
                 true);
             handled = true;
@@ -666,14 +955,11 @@ static bool flock_view_input_callback(InputEvent* event, void* context) {
                 fv->view,
                 FlockViewModel * model,
                 {
-                    ReconApp* app = model->app;
-                    int count = 0;
-                    if(app) {
-                        furi_mutex_acquire(app->mutex, FuriWaitForever);
-                        count = (int)app->flock_count;
-                        furi_mutex_release(app->mutex);
-                    }
-                    if(model->selected < count - 1) model->selected++;
+                    // Bound by the DISPLAY list, which is what the operator sees.
+                    // order_count is rebuilt every draw from flock_count, so it
+                    // needs no lock of its own here.
+                    if(model->selected < model->order_count - 1) model->selected++;
+                    model->sel_valid = false;
                 },
                 true);
             handled = true;
@@ -690,9 +976,21 @@ static bool flock_view_input_callback(InputEvent* event, void* context) {
                 furi_mutex_release(app->mutex);
                 if(showing) return true;
             }
-            int sel = 0;
-            with_view_model(fv->view, FlockViewModel * model, { sel = model->selected; }, false);
-            if(fv->ok_cb) fv->ok_cb(fv->ok_ctx, sel);
+            // ok_cb takes a TABLE index, and model->selected is a display
+            // position, so map it through order[]. Passing the display position
+            // straight through would open the detail screen for a different
+            // camera than the highlighted one.
+            int table_idx = -1;
+            with_view_model(
+                fv->view,
+                FlockViewModel * model,
+                {
+                    if(model->selected >= 0 && model->selected < model->order_count) {
+                        table_idx = model->order[model->selected];
+                    }
+                },
+                false);
+            if(table_idx >= 0 && fv->ok_cb) fv->ok_cb(fv->ok_ctx, table_idx);
             handled = true;
         }
     }
@@ -702,6 +1000,8 @@ static bool flock_view_input_callback(InputEvent* event, void* context) {
 FlockView* flock_view_alloc(void) {
     FlockView* fv = malloc(sizeof(FlockView));
     fv->ok_cb = NULL;
+    fv->hold_cb = NULL;
+    fv->hold_ctx = NULL;
     fv->ok_ctx = NULL;
     fv->view = view_alloc();
     view_set_context(fv->view, fv);
@@ -715,6 +1015,9 @@ FlockView* flock_view_alloc(void) {
             model->app = NULL;
             model->selected = 0;
             model->top = 0;
+            model->card_index = -1;
+            model->order_count = 0;
+            model->sel_valid = false;
         },
         false);
     return fv;
@@ -735,6 +1038,11 @@ void flock_view_set_app(FlockView* fv, void* app) {
     with_view_model(fv->view, FlockViewModel * model, { model->app = app; }, false);
 }
 
+void flock_view_set_hold_callback(FlockView* fv, FlockViewOkCallback cb, void* context) {
+    fv->hold_cb = cb;
+    fv->hold_ctx = context;
+}
+
 void flock_view_set_ok_callback(FlockView* fv, FlockViewOkCallback cb, void* context) {
     fv->ok_cb = cb;
     fv->ok_ctx = context;
@@ -751,6 +1059,9 @@ void flock_view_reset(FlockView* fv) {
         {
             model->selected = 0;
             model->top = 0;
+            // Drop the device anchor too: a reset means "start at the top of the
+            // list", and a stale MAC would drag the cursor back to it.
+            model->sel_valid = false;
         },
         true);
 }

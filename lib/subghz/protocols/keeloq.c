@@ -9,6 +9,7 @@
 #include "../blocks/encoder.h"
 #include "../blocks/generic.h"
 #include "../blocks/math.h"
+#include "common.h"
 
 #include "../blocks/custom_btn_i.h"
 #include "../subghz_keystore_i.h"
@@ -67,7 +68,7 @@ const SubGhzProtocolDecoder subghz_protocol_keeloq_decoder = {
     .reset = subghz_protocol_decoder_keeloq_reset,
 
     .get_hash_data = NULL,
-    .get_hash_data_long = subghz_protocol_decoder_keeloq_get_hash_data,
+    .get_hash_data_long = subghz_protocol_decoder_common_get_hash_data,
     .serialize = subghz_protocol_decoder_keeloq_serialize,
     .deserialize = subghz_protocol_decoder_keeloq_deserialize,
     .get_string = subghz_protocol_decoder_keeloq_get_string,
@@ -80,7 +81,7 @@ const SubGhzProtocolEncoder subghz_protocol_keeloq_encoder = {
 
     .deserialize = subghz_protocol_encoder_keeloq_deserialize,
     .stop = subghz_protocol_encoder_keeloq_stop,
-    .yield = subghz_protocol_encoder_keeloq_yield,
+    .yield = subghz_protocol_encoder_common_yield,
 };
 
 const SubGhzProtocol subghz_protocol_keeloq = {
@@ -121,8 +122,8 @@ void* subghz_protocol_encoder_keeloq_alloc(SubGhzEnvironment* environment) {
     instance->keystore = subghz_environment_get_keystore(environment);
 
     instance->encoder.repeat = 3;
-    instance->encoder.size_upload = 0;
-    instance->encoder.upload = NULL;
+    instance->encoder.size_upload = 1100;
+    instance->encoder.upload = malloc(instance->encoder.size_upload * sizeof(LevelDuration));
     instance->encoder.is_running = false;
 
     instance->manufacture_from_file = furi_string_alloc();
@@ -200,8 +201,9 @@ static bool subghz_protocol_keeloq_gen_data(
     }
     // end gendata part
     // override button if we change it with signal settings button editor
-    if(subghz_block_generic_global_button_override_get(&btn))
+    if(subghz_block_generic_global_button_override_get(&btn)) {
         FURI_LOG_D(TAG, "Button sucessfully changed to 0x%X", btn);
+    }
 
     uint32_t fix = 0;
 
@@ -593,6 +595,40 @@ static size_t subghz_protocol_encoder_keeloq_encode_to_timings(
         return 0;
     }
 
+    // Superrollo GW60 (HCS361) has its own framing (Te=450, asymmetric preamble
+    // Te/2Te, a 10*Te sync pulse, and a 67-bit frame = 64 payload + VLOW + 2-bit
+    // CRC). Timings differ from KeeLoq's, so emit it explicitly.
+    if(strcmp(instance->manufacture_name, "Superrollo") == 0) {
+        const uint32_t t = 450;
+        for(uint8_t i = 0; i < 9; i++) { // preamble: 9x (Te HIGH / 2Te LOW)
+            instance->encoder.upload[index++] = level_duration_make(true, t);
+            instance->encoder.upload[index++] = level_duration_make(false, t * 2);
+        }
+        instance->encoder.upload[index++] = level_duration_make(true, t * 10); // sync HIGH
+        instance->encoder.upload[index++] = level_duration_make(false, t * 10); // sync LOW
+        // 2-bit CRC over the 64 payload bits (LSB..MSB) plus VLOW(=1)
+        uint64_t w0 = subghz_protocol_blocks_reverse_key(instance->generic.data, 64);
+        uint8_t crc0 = 0, crc1 = 0;
+        for(uint8_t i = 0; i < 65; i++) {
+            uint8_t din = (i < 64) ? (uint8_t)((w0 >> i) & 1) : 1;
+            uint8_t nc1 = crc0 ^ din;
+            crc0 = (nc1 ^ crc1) & 1;
+            crc1 = nc1 & 1;
+        }
+        // 64 data bits (MSB first) + VLOW + CRC0 + CRC1; PWM 1=Te/2Te, 0=2Te/Te
+        for(uint8_t i = 67; i > 0; i--) {
+            uint8_t bit = (i > 3)  ? bit_read(instance->generic.data, i - 4) :
+                          (i == 3) ? 1 :
+                          (i == 2) ? crc0 :
+                                     crc1;
+            instance->encoder.upload[index++] = level_duration_make(true, bit ? t : t * 2);
+            instance->encoder.upload[index++] = level_duration_make(false, bit ? t * 2 : t);
+        }
+        instance->encoder.upload[index++] = level_duration_make(true, t); // trailing HIGH
+        instance->encoder.upload[index++] = level_duration_make(false, t * 18); // guard
+        return index;
+    }
+
     uint32_t gap_duration = subghz_protocol_keeloq_const.te_short * 40;
     if((strcmp(instance->manufacture_name, "Sommer") == 0)) {
         gap_duration = subghz_protocol_keeloq_const.te_short * 29;
@@ -651,17 +687,13 @@ static bool
     instance->encoder.size_upload = 0;
     size_t upindex = 0;
 
+    // if we change counter/button in SignalSettings menu then we must bypass counter_modes, just gen and save signal file.
     if(subghz_block_generic_global.cnt_need_override ||
        subghz_block_generic_global.btn_need_override)
         bypass = true;
 
-    const bool mode7 = (keeloq_counter_mode == 7 && !bypass);
-    const size_t frame_max = 11 * 2 + 2 + (size_t)instance->generic.data_count_bit * 2 + 2 + 2;
-    const size_t need = frame_max * (mode7 ? 7 : 1);
-    if(instance->encoder.upload) free(instance->encoder.upload);
-    instance->encoder.upload = malloc(need * sizeof(LevelDuration));
-
-    if(mode7) {
+    // Create mode7 upload only if counter and button was not changed by SignalSettings menu
+    if(keeloq_counter_mode == 7 && !bypass) {
         uint16_t temp_cnt = instance->generic.cnt;
         instance->encoder.repeat = 1;
         for(uint8_t i = 7; i > 0; i--) {
@@ -684,7 +716,6 @@ static bool
             upindex = subghz_protocol_encoder_keeloq_encode_to_timings(
                 instance, (uint8_t)0x00, true, upindex);
         }
-        furi_check(upindex <= need);
         instance->encoder.size_upload = upindex;
         return true;
     } else {
@@ -693,7 +724,6 @@ static bool
             subghz_protocol_encoder_keeloq_encode_to_timings(instance, btn, true, upindex);
     }
 
-    furi_check(instance->encoder.size_upload <= need);
     return true;
 }
 
@@ -809,24 +839,6 @@ void subghz_protocol_encoder_keeloq_stop(void* context) {
     instance->encoder.front = 0; // reset position
 }
 
-LevelDuration subghz_protocol_encoder_keeloq_yield(void* context) {
-    SubGhzProtocolEncoderKeeloq* instance = context;
-
-    if(instance->encoder.repeat == 0 || !instance->encoder.is_running) {
-        instance->encoder.is_running = false;
-        return level_duration_reset();
-    }
-
-    LevelDuration ret = instance->encoder.upload[instance->encoder.front];
-
-    if(++instance->encoder.front == instance->encoder.size_upload) {
-        if(!subghz_block_generic_global.endless_tx) instance->encoder.repeat--;
-        instance->encoder.front = 0;
-    }
-
-    return ret;
-}
-
 void* subghz_protocol_decoder_keeloq_alloc(SubGhzEnvironment* environment) {
     SubGhzProtocolDecoderKeeloq* instance = malloc(sizeof(SubGhzProtocolDecoderKeeloq));
     instance->base.protocol = &subghz_protocol_keeloq;
@@ -872,11 +884,20 @@ void subghz_protocol_decoder_keeloq_feed(void* context, bool level, uint32_t dur
                           subghz_protocol_keeloq_const.te_delta) {
             instance->decoder.parser_step = KeeloqDecoderStepCheckPreambula;
             instance->header_count++;
+        } else if(
+            (level) && (instance->header_count > 2) &&
+            (DURATION_DIFF(duration, subghz_protocol_keeloq_const.te_short * 10) <
+             subghz_protocol_keeloq_const.te_delta * 10)) {
+            // Superrollo GW60 (HCS361): 10*Te HIGH sync pulse before the sync gap
+            instance->decoder.parser_step = KeeloqDecoderStepCheckPreambula;
         }
         break;
     case KeeloqDecoderStepCheckPreambula:
-        if((!level) && (DURATION_DIFF(duration, subghz_protocol_keeloq_const.te_short) <
-                        subghz_protocol_keeloq_const.te_delta)) {
+        if((!level) && ((DURATION_DIFF(duration, subghz_protocol_keeloq_const.te_short) <
+                         subghz_protocol_keeloq_const.te_delta) ||
+                        // Superrollo GW60 asymmetric preamble: LOW is 2*Te
+                        (DURATION_DIFF(duration, subghz_protocol_keeloq_const.te_short * 2) <
+                         subghz_protocol_keeloq_const.te_delta))) {
             instance->decoder.parser_step = KeeloqDecoderStepReset;
             break;
         }
@@ -907,7 +928,7 @@ void subghz_protocol_decoder_keeloq_feed(void* context, bool level, uint32_t dur
                 if((instance->decoder.decode_count_bit >=
                     subghz_protocol_keeloq_const.min_count_bit_for_found) &&
                    (instance->decoder.decode_count_bit <=
-                    subghz_protocol_keeloq_const.min_count_bit_for_found + 2)) {
+                    subghz_protocol_keeloq_const.min_count_bit_for_found + 3)) {
                     if(instance->generic.data != instance->decoder.decode_data) {
                         instance->generic.data = instance->decoder.decode_data;
                         instance->generic.data_count_bit =
@@ -1434,13 +1455,6 @@ static uint32_t subghz_protocol_keeloq_check_remote_controller(
     subghz_custom_btn_set_max(4);
 
     return resdecrypt;
-}
-
-uint32_t subghz_protocol_decoder_keeloq_get_hash_data(void* context) {
-    furi_assert(context);
-    SubGhzProtocolDecoderKeeloq* instance = context;
-    return subghz_protocol_blocks_get_hash_data_long(
-        &instance->decoder, (instance->decoder.decode_count_bit / 8) + 1);
 }
 
 SubGhzProtocolStatus subghz_protocol_decoder_keeloq_serialize(

@@ -1,105 +1,39 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 ReconGrunt
+//
+// Name, version, and the people who built it. Nothing else.
+//
+// THIS SCREEN USED TO BE ~3.6 KB OF LITERAL TEXT, and the Help screen was
+// another ~3.6 KB. On a FAP every byte of .rodata is loaded into RAM alongside
+// .text and .bss, so those two strings alone were costing more than 7 KB of the
+// heap for the whole app run. That mattered: with the app running, the largest
+// contiguous block left was ~25 KB, and the ESP flasher plugin needs ~23 KB in
+// one piece, so a firmware backup ran the device out of memory and crashed it.
+// Documentation belongs in README.md and docs/, which cost nothing at runtime.
+//
+// Bots are deliberately not credited. Dependabot is not a contributor.
 #include "../recon_app_i.h"
 
-#define RECON_ABOUT_TEXT                 \
-    "FlipDeFlock " RECON_VERSION "\n"    \
-    "Snoop onto them as\n"               \
-    "they snoop onto us.\n \n"           \
-    "Passive Flock / ALPR scan.\n"       \
-    "Pairs your Flipper with an\n"       \
-    "ESP32 to survey the radio\n"        \
-    "for surveillance gear.\n"           \
-    "Tracker actions are explicit.\n \n" \
-    "FLOCK / ALPR DETECT\n"              \
-    "Finds Flock Safety / ALPR\n"        \
-    "cameras via an ESP32\n"             \
-    "(Companion FW or Marauder).\n"      \
-    "Matches OUIs, phone-home\n"         \
-    "probes, SSID names & probe\n"       \
-    "IE fingerprints. OUI-only\n"        \
-    "hits are 'Possible' - verify\n"     \
-    "by eye, never assume.\n \n"         \
-    "NET GUARDIAN (Companion)\n"         \
-    "Always-on watch face.\n"            \
-    "Fuses the radios into one\n"        \
-    "CLEAR / WATCHFUL / ELEVATED\n"      \
-    "'am I being watched?' score;\n"     \
-    "counts Flock cameras, nearby\n"     \
-    "Flippers & active attacks.\n"       \
-    "OK opens the Suspicious\n"          \
-    "list.\n \n"                         \
-    "LOCATOR (Companion)\n"              \
-    "Hunt a marked device by\n"          \
-    "signal: a hot/cold meter\n"         \
-    "that climbs as you get\n"           \
-    "closer. Works without GPS.\n"       \
-    "No compass arrow (that needs\n"     \
-    "a directional antenna).\n \n"       \
-    "FLOCK MAP\n"                        \
-    "On-device map of detected\n"        \
-    "cameras around your GPS fix.\n"     \
-    " \n"                                \
-    "BLE / TRACKER (Companion)\n"        \
-    "Finds AirTag / Tile /\n"            \
-    "SmartTag / Find My & Flock\n"       \
-    "BLE; flags a tracker that\n"        \
-    "follows you.\n \n"                  \
-    "Tracker detail offers Ping\n"       \
-    "and separated-state Ring.\n \n"     \
-    "REPORTS\n"                          \
-    "Marked finds export to\n"           \
-    "Markdown, DeFlock GeoJSON,\n"       \
-    "KML, CSV & WiGLE under\n"           \
-    "apps_data/flipdeflock/\n"           \
-    "reports. Share-to-DeFlock\n"        \
-    "shows a QR to submit from\n"        \
-    "your phone (no network).\n \n"      \
-    "SIGNATURES\n"                       \
-    "Drop apps_data/flipdeflock/\n"      \
-    "signatures.json to add OUIs,\n"     \
-    "SSID & IE-fp signatures.\n"         \
-    "Load-only, offline,\n"              \
-    "fail-safe.\n \n"                    \
-    "WIRING\n"                           \
-    "ESP32 on USART\n"                   \
-    "(pin13 TX / pin14 RX).\n"           \
-    "GPS on LPUART (pin15/16)\n"         \
-    "so both run together.\n \n"         \
-    "BOARD MODE (Settings)\n"            \
-    "Marauder: keep your board\n"        \
-    "as-is, no flashing - Flock\n"       \
-    "detect, GPS & reports.\n"           \
-    "Companion: flash our FW\n"          \
-    "(via 'ESP32 Firmware') to\n"        \
-    "add BLE tracker scan, Net\n"        \
-    "Guardian, Locator,\n"               \
-    "deauth & dual-band Flock.\n \n"     \
-    "THANKS\n"                           \
-    "Thank you to @h00die for\n"         \
-    "actively contributing to\n"         \
-    "the project!\n \n"                  \
-    "SUPPORT\n"                          \
-    "Free forever - donations\n"         \
-    "never gate a feature.\n"            \
-    "BTC + more: Support menu\n \n"      \
-    "Companion FW + OUI data:\n"         \
-    "see esp32_companion/ and\n"         \
-    "deflock.org. ALPR passive;\n"       \
-    "lawful authorized use only."
+// The author is named under the title; CONTRIBUTORS is for people who
+// contributed TO the project, which is not the same list.
+#define RECON_ABOUT_TEXT              \
+    "FlipDeFlock " RECON_VERSION "\n" \
+    "Made by ReconGrunt\n \n"         \
+    "Find the cameras that\n"         \
+    "are watching you.\n \n"          \
+    "CONTRIBUTORS\n"                  \
+    "h00die\n"                        \
+    "nickk02\n \n"                    \
+    "GPL-3.0-or-later\n"              \
+    "Free forever."
 
 void recon_scene_about_on_enter(void* context) {
     ReconApp* app = context;
     Widget* widget = app->widget;
     widget_reset(widget);
-    FuriString* s = furi_string_alloc();
-    furi_string_printf(
-        s,
-        "Mode: %s\n \n%s",
-        app->settings.backend == EspBackendGeneric ? "Marauder (Flock)" : "Companion (all)",
-        RECON_ABOUT_TEXT);
-    widget_add_text_scroll_element(widget, 0, 0, 128, 64, furi_string_get_cstr(s));
-    furi_string_free(s);
+    // x=2/y=1: at 0,0 the first baseline lands on row 0 and the top pixel row of
+    // every glyph in the title is cut off against the bezel.
+    widget_add_text_scroll_element(widget, 2, 1, 124, 63, RECON_ABOUT_TEXT);
     view_dispatcher_switch_to_view(app->view_dispatcher, ReconViewWidget);
 }
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 ApertureFox Technology. MIT License.
 """Build the old hardcoded Flipcraft world as a current .fcw asset.
 
 The source world is the original blockRam.py 8x8x8 layout restored from old

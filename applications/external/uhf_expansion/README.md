@@ -4,23 +4,31 @@ UHF RFID Reader/Writer expansion for Flipper Zero, communicating over UART bridg
 
 ![uhf_expansion](uhf_expansion.png)
 
+**Available in the official Flipper Apps Catalog:**
+[Install UHF Expansion](https://lab.flipper.net/apps/uhf_expansion)
+
 ## Features
 
 - **Inventory Scan** — Fast UHF tag scanning with real-time display
+- **Feature Menu** — Opens after reader detection with six focused entries
+- **TID Decoder** — Automatically pauses on one tag and shows scrollable MDID/model details
+- **EPC Fuzzing** — Generates incremental EPC variants with explicit verified writes
+- **Persistent Settings** — Configure sound, 0–20 dBm RF power, and a startup tool
 - **Paged EPC List** — Browse scanned tags page by page, with truncated preview
 - **Tag Details** — View full EPC, RSSI, and PC (Protocol Control) bits for each tag
+- **Tag Memory Actions** — Read and write EPC, TID, and User Data on compatible tags
 - **Save CSV Records** — Export scanned tags to CSV file on SD card
 - **About Page** — Version info and project links
 
 ## Screenshots
 
-| Radar | About |
+| Main menu | TID Decoder |
 |:--:|:--:|
-| ![Radar screen](images/01.png) | ![About screen](images/05.png) |
-| **Settings menu** | **Tag counter** |
-| ![Settings menu](images/04.png) | ![Tag counter screen](images/03.png) |
-| **Tag list** | |
-| ![Tag list screen](images/02.png) | |
+| ![Main menu](images/01.png) | ![TID Decoder](images/05.png) |
+| **Tag operations** | **Tag Inventory** |
+| ![Tag operations](images/04.png) | ![Tag Inventory](images/03.png) |
+| **UHF Radar** | **EPC Fuzzing** |
+| ![UHF Radar](images/02.png) | ![EPC Fuzzing](images/06.png) |
 
 ## Hardware Setup
 
@@ -43,6 +51,11 @@ UHF RFID Reader/Writer expansion for Flipper Zero, communicating over UART bridg
 - UCM601 — UHF RFID transceiver module
 
 ## Installation
+
+### Official Flipper Apps Catalog (recommended)
+
+Install **UHF Expansion** directly from the
+[official Flipper Apps Catalog](https://lab.flipper.net/apps/uhf_expansion).
 
 ### Using ufbt
 
@@ -73,14 +86,28 @@ ufbt build
 
 The compiled `.fap` will be at `build/uhf_expansion.fap`.
 
+## Publishing a New Catalog Version
+
+Normal commits only run the build workflow and do not publish a new version.
+To publish an update to the official Flipper Apps Catalog:
+
+1. Increase `fap_version` in `application.fam` using the `major.minor` format.
+2. Add a matching `vmajor.minor:` section to `CHANGELOG.md`.
+3. Commit with the exact subject `release: major.minor` and push to `master`.
+
+For example, a `release: 1.1` commit must contain `fap_version="1.1"` and a
+`v1.1:` changelog section. The release workflow builds the app, validates the
+Catalog bundle, updates the Catalog fork, and opens the upstream pull request.
+
 ## Usage
 
 1. Connect your UHF module as described in [Hardware Setup](#hardware-setup)
 2. Open **Apps → GPIO → UHF Expansion**
-3. Press **OK** to start/stop inventory scanning
-4. Navigate the tag list with **Up/Down**
-5. Press **OK** on a tag to view details
-6. Use the submenu to save or clear tag records
+3. Choose **UHF Radar**, **Tag Inventory**, **TID Decoder**, **EPC Fuzzing**, **Settings**, or **About Us**
+4. In UHF Radar or Tag Inventory, press **OK** to start/stop inventory scanning
+5. Navigate the tag list with **Up/Down**
+6. Press **OK** on a tag to view details
+7. Use the submenu to save or clear tag records
 
 ## Protocol
 

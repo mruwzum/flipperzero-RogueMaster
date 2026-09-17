@@ -464,10 +464,10 @@ static void draw_action_bar(Canvas* canvas, const char* ok_action, bool offer_sa
     canvas_draw_box(canvas, 0, 55, 128, 9);
     canvas_set_color(canvas, ColorWhite);
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 4, 62, ok_action);
+    canvas_draw_str(canvas, 4, 63, ok_action);
     if(offer_save) {
-        canvas_draw_str_aligned(canvas, 125, 62, AlignRight, AlignBottom, "save log");
-        draw_right_key(canvas, 125 - canvas_string_width(canvas, "save log") - 9, 61);
+        canvas_draw_str_aligned(canvas, 125, 63, AlignRight, AlignBottom, "save log");
+        draw_right_key(canvas, 125 - canvas_string_width(canvas, "save log") - 9, 59);
     }
     canvas_set_color(canvas, ColorBlack);
 }
@@ -509,7 +509,9 @@ static void draw_verdict_icon(Canvas* canvas, uint8_t cx, uint8_t cy, ChipVerdic
         break;
     case VerdictNoMatch:
     case VerdictUnknown:
-        // Question mark in a ring
+    case VerdictAmbiguous:
+        // Question mark in a ring. Ambiguous belongs here and not with the
+        // silent ring: the bus answered, the identity is what is unresolved.
         canvas_draw_circle(canvas, cx, cy, 7);
         canvas_draw_line(canvas, cx - 2, cy - 3, cx + 1, cy - 4);
         canvas_draw_line(canvas, cx + 1, cy - 4, cx + 2, cy - 1);
@@ -543,10 +545,10 @@ static void draw_hint_bar(Canvas* canvas, const char* right_action, bool offer_s
     canvas_draw_box(canvas, 0, 55, 128, 9);
     canvas_set_color(canvas, ColorWhite);
     canvas_set_font(canvas, FontSecondary);
-    draw_right_key(canvas, 5, 60);
-    canvas_draw_str(canvas, 12, 62, right_action);
+    draw_right_key(canvas, 5, 59);
+    canvas_draw_str(canvas, 12, 63, right_action);
     if(offer_save) {
-        canvas_draw_str_aligned(canvas, 124, 62, AlignRight, AlignBottom, "save proof");
+        canvas_draw_str_aligned(canvas, 124, 63, AlignRight, AlignBottom, "save proof");
         draw_down_key(canvas, 124 - canvas_string_width(canvas, "save proof") - 8, 57);
     }
     canvas_set_color(canvas, ColorBlack);
@@ -558,10 +560,10 @@ static void draw_offer_bar(Canvas* canvas, const char* ok_action) {
     canvas_draw_box(canvas, 0, 55, 128, 9);
     canvas_set_color(canvas, ColorWhite);
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 4, 62, "OK");
-    canvas_draw_str(canvas, 20, 62, ok_action);
-    canvas_draw_str_aligned(canvas, 124, 62, AlignRight, AlignBottom, "details");
-    draw_right_key(canvas, 124 - canvas_string_width(canvas, "details") - 9, 61);
+    canvas_draw_str(canvas, 4, 63, "OK");
+    canvas_draw_str(canvas, 20, 63, ok_action);
+    canvas_draw_str_aligned(canvas, 124, 63, AlignRight, AlignBottom, "details");
+    draw_right_key(canvas, 124 - canvas_string_width(canvas, "details") - 9, 59);
     canvas_set_color(canvas, ColorBlack);
 }
 
@@ -570,9 +572,9 @@ static void draw_choice_bar(Canvas* canvas) {
     canvas_draw_box(canvas, 0, 55, 128, 9);
     canvas_set_color(canvas, ColorWhite);
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 4, 62, "OK");
-    canvas_draw_str(canvas, 20, 62, "yes");
-    canvas_draw_str_aligned(canvas, 124, 62, AlignRight, AlignBottom, "no");
+    canvas_draw_str(canvas, 4, 63, "OK");
+    canvas_draw_str(canvas, 20, 63, "yes");
+    canvas_draw_str_aligned(canvas, 124, 63, AlignRight, AlignBottom, "no");
     draw_down_key(canvas, 124 - canvas_string_width(canvas, "no") - 8, 57);
     canvas_set_color(canvas, ColorBlack);
 }
@@ -686,10 +688,10 @@ static void scan_draw_callback(Canvas* canvas, void* model) {
         // in a list of bad possibilities with nothing attached to it.
         canvas_draw_box(canvas, 0, 55, 128, 9);
         canvas_set_color(canvas, ColorWhite);
-        canvas_draw_str(canvas, 4, 62, "OK");
-        canvas_draw_str(canvas, 20, 62, "rescan");
-        canvas_draw_str_aligned(canvas, 124, 62, AlignRight, AlignBottom, "find out");
-        draw_right_key(canvas, 124 - canvas_string_width(canvas, "find out") - 9, 61);
+        canvas_draw_str(canvas, 4, 63, "OK");
+        canvas_draw_str(canvas, 20, 63, "rescan");
+        canvas_draw_str_aligned(canvas, 124, 63, AlignRight, AlignBottom, "find out");
+        draw_right_key(canvas, 124 - canvas_string_width(canvas, "find out") - 9, 59);
         canvas_set_color(canvas, ColorBlack);
         return;
     }
@@ -701,7 +703,13 @@ static void scan_draw_callback(Canvas* canvas, void* model) {
     if(m->found_count == 1) {
         const I2CFoundDevice* dev = &m->found[0];
         ChipVerdict v = dev->ident.verdict;
-        const char* name = dev->ident.chip ? dev->ident.chip->name : "Unknown chip";
+        // No chip means one of two different things, and they read nothing
+        // alike. Nothing here answered to anything known, or several known
+        // parts answered equally well -- the second is a populated address
+        // this tool declines to guess at, not an unrecognised one.
+        const char* name = dev->ident.chip       ? dev->ident.chip->name :
+                           v == VerdictAmbiguous ? "Several parts" :
+                                                   "Unknown chip";
         const char* kind = dev->ident.chip ? dev->ident.chip->kind : NULL;
 
         if(m->answer == AnswerAsking) {
@@ -713,10 +721,27 @@ static void scan_draw_callback(Canvas* canvas, void* model) {
             canvas_set_font(canvas, FontSecondary);
             if(kind) canvas_draw_str(canvas, 26, 25, kind);
 
+            // The note belongs on this screen and not only on the detail
+            // screen behind it. This is the screen that asks whether the part
+            // is what was bought, and a GY-271 board reading QMC5883P is
+            // exactly the case where the user cannot answer that from what is
+            // drawn: the number silkscreened on the module and the number
+            // burned into the die are different things, and nothing else here
+            // says so. Every note in the database fits centred on 128px --
+            // tools/screen_width.py measures them, the widest clears by four
+            // -- so none needs truncating; they do need the room, which is why
+            // the two lines below drop by five when a note is present.
+            const char* note = dev->ident.chip ? dev->ident.chip->note : NULL;
+            uint8_t vy = 38, qy = 49;
+            if(note) {
+                canvas_draw_str_aligned(canvas, 64, 34, AlignCenter, AlignBottom, note);
+                vy = 43;
+                qy = 52;
+            }
             snprintf(buf, sizeof(buf), "%s at 0x%02X", chip_verdict_headline(v), dev->addr);
-            canvas_draw_str_aligned(canvas, 64, 38, AlignCenter, AlignBottom, buf);
+            canvas_draw_str_aligned(canvas, 64, vy, AlignCenter, AlignBottom, buf);
             canvas_draw_str_aligned(
-                canvas, 64, 49, AlignCenter, AlignBottom, "Is this what you bought?");
+                canvas, 64, qy, AlignCenter, AlignBottom, "Is this what you bought?");
             draw_choice_bar(canvas);
             return;
         }
@@ -753,7 +778,22 @@ static void scan_draw_callback(Canvas* canvas, void* model) {
             canvas_draw_str(canvas, 36, 20, proven ? "ALL GOOD" : "IT ANSWERS");
             canvas_set_font(canvas, FontSecondary);
             canvas_draw_str(canvas, 36, 30, proven ? "Real deal." : "No ID to check.");
-            canvas_draw_str_aligned(canvas, 64, 42, AlignCenter, AlignBottom, name);
+            if(v == VerdictAmbiguous) {
+                // The count, not the names: at 0x40 there are three of them and
+                // the shortest honest list of the three is wider than the
+                // screen. The detail screen and the report have the room to
+                // name them, and this line says there is something to go and
+                // read there.
+                snprintf(
+                    buf,
+                    sizeof(buf),
+                    "%u parts share 0x%02X",
+                    (unsigned)dev->ident.candidates,
+                    dev->addr);
+                canvas_draw_str_aligned(canvas, 64, 42, AlignCenter, AlignBottom, buf);
+            } else {
+                canvas_draw_str_aligned(canvas, 64, 42, AlignCenter, AlignBottom, name);
+            }
 
             // The ID said what it is; a live test says it works. Offered here
             // and only here, because this is the moment the answer is yes.
@@ -926,6 +966,10 @@ static I2CNotifyKind verdict_notify_kind(ChipVerdict verdict) {
         return I2CNotifyBad;
     case VerdictUnknown:
         return I2CNotifyAttention;
+    // Neutral, like DetectedNoId, because it lands on the same screen and for
+    // the same reason: something real answered and this tool cannot name it.
+    case VerdictAmbiguous:
+        return I2CNotifyNeutral;
     default:
         return I2CNotifyNeutral;
     }
@@ -1133,7 +1177,7 @@ static const PadFamily pad_families[SILENT_ROWS] = {
     // exactly as long as the pin is low. Nothing is latched, so there is no
     // moment where letting go is safe.
     {
-        .labels = "XSHUT  RES  EN",
+        .labels = "XSHUT  RES  EN  RST",
         .when_high = "High = enabled. Not this.",
         .when_low = "Low holds it in reset.",
         .explains_low = true,
@@ -1313,19 +1357,37 @@ static void silent_draw_callback(Canvas* canvas, void* model) {
     // would have announced a level nothing had measured -- and FLOATING is the
     // one level that offers the fix on every mode family, so it would have
     // offered to act on it too.
-    const char* title = "Reading the pad...";
-    if(m->level == I2CPadFloating) title = "Pad reads FLOATING";
-    if(m->level == I2CPadHigh) title = "Pad reads HIGH";
-    if(m->level == I2CPadLow) title = "Pad reads LOW";
-    canvas_draw_str_aligned(canvas, 2, 10, AlignLeft, AlignBottom, title);
+    const char* title = "Reading pad...";
+    if(m->level == I2CPadFloating) title = "Pad: FLOATING";
+    if(m->level == I2CPadHigh) title = "Pad: HIGH";
+    if(m->level == I2CPadLow) title = "Pad: LOW";
 
-    canvas_set_font(canvas, FontSecondary);
     // The fix is offered only once the reading and the chosen pad actually
     // form a cause; before that there is nothing to fix and saying so would be
     // a guess. Left saves either way -- Down belongs to the list, and the hint
     // yields to the stronger action rather than the key going away.
-    canvas_draw_str_aligned(
-        canvas, 126, 10, AlignRight, AlignBottom, explained ? "OK fix" : "< save");
+    //
+    // Hint first, so the title can be measured against the room that is left.
+    // Both used to be drawn at y=10 from opposite edges with no check between
+    // them, and "Pad reads FLOATING" in FontPrimary is wide enough to run
+    // straight through "< save".
+    const char* hint = explained ? "OK fix" : "< save";
+    canvas_set_font(canvas, FontSecondary);
+    uint16_t hint_w = canvas_string_width(canvas, hint);
+    canvas_draw_str_aligned(canvas, 126, 10, AlignRight, AlignBottom, hint);
+
+    canvas_set_font(canvas, FontPrimary);
+    char title_buf[24];
+    snprintf(title_buf, sizeof(title_buf), "%s", title);
+    // Title starts at x=2 and must stop 4px short of where the hint begins.
+    uint16_t title_avail = (126 - hint_w) - 2 - 4;
+    size_t title_len = strlen(title_buf);
+    while(title_len && canvas_string_width(canvas, title_buf) > title_avail) {
+        title_buf[--title_len] = '\0';
+    }
+    canvas_draw_str_aligned(canvas, 2, 10, AlignLeft, AlignBottom, title_buf);
+
+    canvas_set_font(canvas, FontSecondary);
     for(uint8_t row = 0; row < SILENT_ROWS; row++) {
         uint8_t y = 22 + row * 10;
         bool sel = (row == m->selected);
@@ -1622,6 +1684,43 @@ static void wiring_exit_callback(void* context) {
 
 /* ---------------- Detail screen ---------------- */
 
+// Which parts the address could be holding. Only the ones with no ID register
+// can be listed: the other way to land on VerdictAmbiguous is two chips whose
+// ID checks both passed, and those are not recorded anywhere by the time this
+// draws. The count in the identification covers that case, so this returns to
+// it when it has no names to offer.
+//
+// Names are dropped from the end once the line is full rather than skipped over
+// to fit a shorter one further down: a list printed in an order that matches
+// nothing is worse than a short list that says how much it left out.
+static uint8_t detail_draw_candidates(Canvas* canvas, const I2CFoundDevice* dev, uint8_t y) {
+    const ChipEntry* cands[CHIP_MAX_ADDRS] = {0};
+    const size_t total = chip_db_no_id_at(dev->addr, cands, COUNT_OF(cands));
+    char buf[48];
+
+    if(total != dev->ident.candidates || total == 0) {
+        snprintf(buf, sizeof(buf), "%u parts fit, none named.", (unsigned)dev->ident.candidates);
+        canvas_draw_str(canvas, 2, y, buf);
+        return 9;
+    }
+
+    const uint16_t budget = 126 - canvas_string_width(canvas, " +9");
+    size_t used = (size_t)snprintf(buf, sizeof(buf), "Fits:");
+    size_t shown = 0;
+    for(size_t i = 0; i < total && i < COUNT_OF(cands); i++) {
+        snprintf(buf + used, sizeof(buf) - used, " %s", cands[i]->name);
+        if(canvas_string_width(canvas, buf) > budget) {
+            buf[used] = '\0';
+            break;
+        }
+        used = strlen(buf);
+        shown++;
+    }
+    if(shown < total) snprintf(buf + used, sizeof(buf) - used, " +%u", (unsigned)(total - shown));
+    canvas_draw_str(canvas, 2, y, buf);
+    return 9;
+}
+
 static void detail_draw_callback(Canvas* canvas, void* model) {
     DetailViewModel* m = model;
     const I2CFoundDevice* dev = &m->device;
@@ -1634,7 +1733,9 @@ static void detail_draw_callback(Canvas* canvas, void* model) {
         sizeof(buf),
         "0x%02X  %s",
         dev->addr,
-        dev->ident.chip ? dev->ident.chip->name : "UNKNOWN");
+        dev->ident.chip                        ? dev->ident.chip->name :
+        dev->ident.verdict == VerdictAmbiguous ? "AMBIGUOUS" :
+                                                 "UNKNOWN");
     canvas_draw_str(canvas, 2, 10, buf);
 
     canvas_set_font(canvas, FontSecondary);
@@ -1670,6 +1771,9 @@ static void detail_draw_callback(Canvas* canvas, void* model) {
         canvas_draw_str(canvas, 2, 20, "This chip has no ID reg:");
         canvas_draw_str(canvas, 2, 29, "only presence is proven.");
         y = 38;
+    }
+    if(dev->ident.verdict == VerdictAmbiguous && y <= 45) {
+        y += detail_draw_candidates(canvas, dev, y);
     }
     if(any_read_failed && y <= 45) {
         canvas_draw_str(canvas, 2, y, "Answers, but reads fail.");

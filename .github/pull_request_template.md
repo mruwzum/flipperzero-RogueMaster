@@ -6,22 +6,25 @@
 
 - [ Describe how to verify changes ]
 
-# Author Checklist (Fill this out):
+# Author checklist (Fill this out)
 
-- [ ] I have performed a self-review of my own code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have made corresponding changes to the documentation (if it exists)
+- [ ] I've read the [contribution guidelines](https://github.com/flipperdevices/flipperzero-firmware/blob/dev/CONTRIBUTING.md) and my PR follows them.
+- [ ] I own the code I'm submitting or have code owner's permission (or code license allows redistribution) to submit it.
+- [ ] I have performed a self-review of my own code.
+- [ ] I have commented my code, particularly in hard-to-understand areas.
 
-# AI usage disclosure (Fill this out):
+# AI usage disclosure (Fill this out)
 
-- [ ] Partially AI assisted (clarify below which code was AI assisted and briefly explain what it does).
-- [ ] Fully AI generated (explain what all the generated code does in moderate detail).
+Keep the ONE option below that matches your submission and DELETE the other two.
 
-- [ Describe how AI was used in this PR if it was used ]
+- No AI was used - all code was written by hand.
+- Partially AI assisted - clarify below which parts were AI assisted and briefly explain what they do.
+- Fully AI generated - explain what all the generated code does in moderate detail.
 
-# Checklist (For Reviewer) (Don't fill this out!):
+- [ If AI was used, describe how here. Delete this line if no AI was used. ]
 
-- [ ] PR has proper description of new feature/bugfix
-- [ ] Description contains actions to verify feature/bugfix on the hardware
-- [ ] No obvious issues with the code was found
-- [ ] I've built this code, uploaded it to the device and verified feature/bugfix
+# Reviewer Checklist (Don't fill this out, and don't remove it from the template)
+
+- [ ] PR has description of feature/bug or link to GitHub Project task.
+- [ ] Description contains actions to verify feature/bugfix.
+- [ ] I've built this code, uploaded it to the device and verified feature/bugfix.

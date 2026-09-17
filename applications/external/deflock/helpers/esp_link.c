@@ -75,6 +75,11 @@ static void esp_apply_companion(EspLink* esp, const EspMsg* m) {
         // the same handle when entering a scan scene. Identical discipline to
         // alert_pending: the worker only ever raises, the GUI tick acts.
         recon_app_request_gps_cfg(app);
+        if(m->u.banner.build[0]) {
+            furi_mutex_acquire(app->mutex, FuriWaitForever);
+            snprintf(app->esp_build, sizeof(app->esp_build), "%s", m->u.banner.build);
+            furi_mutex_release(app->mutex);
+        }
         break;
     case EspMsgWifiBegin:
         recon_app_wifi_begin(app);
@@ -110,8 +115,7 @@ static void esp_apply_companion(EspLink* esp, const EspMsg* m) {
             m->u.ble.company,
             m->u.ble.mfg_len ? m->u.ble.mfg : NULL,
             m->u.ble.mfg_len,
-            m->u.ble.raven_gatt,
-            m->u.ble.tracker_separated);
+            m->u.ble.raven_gatt);
         break;
     case EspMsgFlock:
         recon_app_report_flock(
@@ -124,30 +128,37 @@ static void esp_apply_companion(EspLink* esp, const EspMsg* m) {
             m->u.flock.conf,
             m->u.flock.fp,
             m->u.flock.dev_class,
-            m->u.flock.hidden);
+            m->u.flock.hidden,
+            m->u.flock.probe_rate);
         break;
     case EspMsgDeauthTarget:
-        recon_app_add_deauth_target(app, m->u.deauth.bssid, m->u.deauth.channel);
-        break;
     case EspMsgAttack:
-        recon_app_set_attack(app, m->u.attack.kind, m->u.attack.value);
+        // Attack detection moved to Aegis. The universal companion still reports
+        // DA/ATK lines; FlipDeFlock (cameras only) ignores them.
+        break;
+    case EspMsgSurvey:
+        recon_app_survey_add(
+            app,
+            m->u.survey.mac,
+            m->u.survey.fp,
+            m->u.survey.rssi,
+            m->u.survey.channel,
+            m->u.survey.count,
+            m->u.survey.fp2,
+            m->u.survey.sig);
+        break;
+    case EspMsgRemoteId:
+        recon_app_report_remote_id(
+            app, m->u.rid.addr, m->u.rid.rssi, m->u.rid.payload, m->u.rid.payload_len);
         break;
     case EspMsgLocate:
         recon_app_set_locate_rssi(app, m->u.locate.rssi);
         break;
-    case EspMsgAction: {
-        BleActionKind kind = BleActionNone;
-        if(strcmp(m->u.action.op, "PING") == 0) {
-            kind = BleActionPing;
-        } else if(strcmp(m->u.action.op, "RING") == 0) {
-            kind = BleActionRing;
-        }
-        if(kind != BleActionNone) {
-            recon_app_set_ble_action(
-                app, kind, m->u.action.status, m->u.action.have_rssi, m->u.action.rssi);
-        }
+    case EspMsgAction:
+        // Ping / Ring went with the tracker screen; FlipDeFlock transmits
+        // nothing at all now. The companion can still answer an ACT, so parse
+        // it and drop it rather than treating it as an unknown line.
         break;
-    }
     case EspMsgGpsNmea:
         // Only when the operator actually selected the companion as the GPS
         // source. A board that relays NMEA must not be able to override a GPS
@@ -181,7 +192,6 @@ static void esp_apply_companion(EspLink* esp, const EspMsg* m) {
     case EspMsgStatus:
         recon_app_set_esp_status(
             app, m->u.status.frames, m->u.status.hits, m->u.status.channel, true);
-        if(m->u.status.have_deauths) recon_app_set_deauths(app, m->u.status.deauths);
         break;
     case EspMsgIgnore:
     default:
@@ -235,7 +245,8 @@ static void esp_parse_generic(EspLink* esp, char* line) {
             h->conf,
             0,
             h->dev_class,
-            false); // Marauder's scraped text carries no hidden-SSID signal
+            false, // Marauder's scraped text carries no hidden-SSID signal
+            0); // ...nor a probe rate: it is scraped text, not frames
     }
 
     // A line naming more MACs than one scan can carry is pathological; surface it

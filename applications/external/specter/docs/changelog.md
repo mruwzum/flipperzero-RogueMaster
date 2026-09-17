@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.9
+
+A security and correctness audit of the whole codebase. The good news first: a
+strict compiler sweep (`-Wshadow -Wcast-align -Wformat=2 -Wnull-dereference
+-Wduplicated-cond -Wvla -Wstack-usage=1536` and more) found **nothing** across
+all 3,900 lines, there are no unbounded string operations, no division by zero,
+no out-of-bounds indexing, every allocation is paired with its free, and the
+worker thread uses 224 bytes of its 2 KB stack. What follows is what the
+compiler could not see.
+
+- **Fix: `threshold` was the only cross-thread field not marked `volatile`.** It
+  is written by the UI thread and read by the sampling worker in its hot loop,
+  sitting directly beside `full_scale` which was volatile. A single byte cannot
+  tear on this core, but the compiler was entitled to hoist the read out of the
+  loop, in which case a sensitivity change would never reach the worker.
+- **Fix: booleans loaded from the SD card were not normalised.** `saved_struct`
+  validates a magic, a version and a size — it cannot check that the bytes make
+  sense. A `_Bool` holding anything other than 0 or 1 is undefined behaviour the
+  moment it is read, so a hand-edited or corrupted `specter.conf` could put the
+  app somewhere the language has no answer for. Index fields were already
+  clamped; the booleans now are too.
+- **Fix: the logbook grew without any ceiling.** Watch mode appends every few
+  seconds for as long as you leave it standing guard, and nothing ever deleted
+  anything — left running it would grow by a few megabytes a day until it filled
+  the card, taking every other app's storage with it. Each file is now capped at
+  1 MB (roughly twenty thousand findings), and when it is reached the app stops
+  writing and says **`LOG FULL`** rather than failing vaguely or quietly eating
+  the card. Clear the logbook in Settings to carry on.
+- Removed `field_detector_is_running()`: unused, and it reported `true` after the
+  NFC radio failed to open, which was simply untrue.
+- New **`SECURITY.md`** documenting the threat model — chiefly that Specter never
+  transmits, so a hostile reader has no channel to deliver anything over, and the
+  realistic untrusted input is the SD card.
+
+## 2.8
+
+- **Fix: the field meter could never reach 100%, even resting on a reader.** The strength smoother was `ema = (ema * 3 + duty) / 4`, and integer division discards the remainder on every update, so the filter cannot converge on its own input — fed a steady 31% it settles at 28 and stays there. That is a permanent ~3-point under-read of raw duty, about ten points of displayed field. Keeping the smoother's state at 1/16 resolution fixes it: on a real terminal the meter now pegs at `100% MAX` as it always should have.
+- **Fix: the Watch alarm band still read as flashing.** The strobe was toned down in 2.7 to a pair of markers pulsing at 1 Hz, which was still movement on the one part of the screen you are staring at. Nothing on that band animates now — a solid inverted block is already the loudest thing on a light screen, and liveness is carried by the readouts that genuinely change.
+- **New: filter the logbook by type.** Opening the Logbook now asks what you want to see — everything, sweep readings, readers found, site surveys, or watch contacts. Filtering keeps both lines of a matched entry, because a finding without its timestamp is not evidence.
+- The demo animation is now generated from the app's own C rather than from numbers chosen by hand. The old one was quietly impossible: it showed an 81% field while still claiming to be `SCANNING` with zero contacts, when anything over the noise floor latches presence and flips to the alarm strip immediately. `tools_gif_data.c` links the real smoother, presence latch, meter scaling, proximity vocabulary, trend rule, classifier and survey verdict, and prints what the device would actually display.
+- The proximity vocabulary and the warmer/colder trend moved out of the view into the shared pure layer, so they are host-tested and the demo generator reaches the same words and arrows the device shows.
+- Host suite is now **437 checks** across seven pure modules.
+
 ## 2.7
 
 - **Releases now ship two builds.** A `.fap`'s API version is fixed when it is compiled, and the loader warns when it trails the firmware's (`APP:87 < FW:88 — This app might not work`). Official firmware tracks API 87 while Unleashed / RogueMaster / Momentum track 88, so one build cannot satisfy both. Releases now carry `specter.fap` for official firmware and `specter-fw-dev.fap` for the newer line. Reported by @drdelaney in [#1](https://github.com/at0m-b0mb/Specter-FlipperZero/issues/1).

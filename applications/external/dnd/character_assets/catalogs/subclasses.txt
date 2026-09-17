@@ -1,0 +1,13 @@
+# Dungeons & Dolphins SRD 5.2.1 subclass catalog. Format: Subclass|Parent Class
+Path of the Berserker|Barbarian
+College of Lore|Bard
+Life Domain|Cleric
+Circle of the Land|Druid
+Champion|Fighter
+Warrior of the Open Hand|Monk
+Oath of Devotion|Paladin
+Hunter|Ranger
+Thief|Rogue
+Draconic Sorcery|Sorcerer
+Fiend Patron|Warlock
+Evoker|Wizard

@@ -1,0 +1,14 @@
+App(
+    appid="api_caller",
+    name="Api Caller",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="api_caller",
+    stack_size=4 * 1024,
+    fap_icon="images/icon.png",
+    fap_icon_assets="images",
+    fap_category="Tools",
+    fap_author="todotge",
+    fap_weburl="https://github.com/todtge/flipper_api_caller",
+    fap_version="0.1.4",
+    fap_description="A client that lets you easily send and schedule API call requests. A .json import is included.",
+)

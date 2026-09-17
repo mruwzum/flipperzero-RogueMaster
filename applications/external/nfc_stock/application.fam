@@ -20,6 +20,6 @@ App(
     fap_category="NFC",
     fap_author="Endika",
     fap_weburl="https://github.com/Endika/flipper-nfc-stock",
-    fap_version="0.1.5",
+    fap_version="0.1.6",
     fap_description="Alpha build: manage inventory items via NFC tags",
 )

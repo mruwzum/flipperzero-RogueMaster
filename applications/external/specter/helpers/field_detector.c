@@ -37,7 +37,13 @@ struct FieldDetector {
     volatile bool calib_req;
     volatile bool calib_cancel_req;
     volatile uint32_t calib_duration_ms;
-    uint8_t threshold; // duty-cycle noise floor (%)
+    /* Both of these are written by the UI thread and read by the worker in its
+     * hot loop, without the mutex - deliberately, because a single byte cannot
+     * tear on this core and taking a lock per sample would be absurd. They must
+     * be volatile all the same, or the compiler is entitled to hoist the read
+     * out of the loop and the worker would never see a change. threshold was
+     * missing it while full_scale next to it had it. */
+    volatile uint8_t threshold; // duty-cycle noise floor (%)
     volatile uint8_t full_scale; // raw duty that displays as 100%
     FieldStats stats; // guarded by mutex
 };
@@ -150,7 +156,9 @@ static int32_t field_detector_worker(void* context) {
     if(sample_ticks == 0u) sample_ticks = 1u;
 
     uint32_t hits = 0, samples = 0;
-    uint8_t ema = 0; // smoothed strength
+    Ema smoother;
+    ema_reset(&smoother);
+    uint8_t ema = 0; // smoothed strength, 0..100
     bool was_present = false;
     uint32_t window_start = armed_tick;
 
@@ -216,7 +224,9 @@ static int32_t field_detector_worker(void* context) {
 
         if(samples >= WINDOW_SAMPLES) {
             uint8_t duty = (uint8_t)((hits * 100u) / samples);
-            ema = (uint8_t)((ema * 3u + duty) / 4u); // 1st-order low-pass
+            /* Fixed-point so the filter can actually reach its input - see
+             * ema.h for why the obvious integer version reads permanently low. */
+            ema = ema_update(&smoother, duty);
             uint32_t window_ms = now - window_start;
 
             furi_mutex_acquire(fd->mutex, FuriWaitForever);
@@ -225,6 +235,7 @@ static int32_t field_detector_worker(void* context) {
             if(fd->reset_req) {
                 field_stats_clear(s);
                 fd->reset_req = false;
+                ema_reset(&smoother);
                 ema = 0;
                 was_present = false;
                 have_burst = false;
@@ -404,11 +415,6 @@ void field_detector_stop(FieldDetector* fd) {
         furi_thread_free(fd->thread);
         fd->thread = NULL;
     }
-}
-
-bool field_detector_is_running(FieldDetector* fd) {
-    furi_assert(fd);
-    return fd->running;
 }
 
 void field_detector_reset(FieldDetector* fd) {

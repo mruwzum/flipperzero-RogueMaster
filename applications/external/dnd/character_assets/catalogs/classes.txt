@@ -1,0 +1,13 @@
+# Dungeons & Dolphins SRD 5.2.1 class names.
+Barbarian
+Bard
+Cleric
+Druid
+Fighter
+Monk
+Paladin
+Ranger
+Rogue
+Sorcerer
+Warlock
+Wizard

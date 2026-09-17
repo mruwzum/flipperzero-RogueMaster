@@ -2,8 +2,18 @@
 // Copyright (c) 2026 ReconGrunt
 #include "../recon_app_i.h"
 
-static const char* const backend_text[] = {"Companion", "Marauder"};
-static const char* const port_text[] = {"USART 13/14", "LPUART 15/16"};
+// SEVEN-ISH CHARACTERS, and it is a PIXEL budget, not a character count.
+// VariableItemList gives the value column a fixed ~40 px regardless of how short
+// the label is -- verified on hardware by shortening "Board Mode" to "Board" and
+// watching the value clip identically. "Companion" rendered as "Compani" and
+// "Marauder" as "Maraude"; the selected row marquee-scrolls, so the truncation
+// is only visible at rest, which is exactly when the operator glances at it.
+// Same clip that already forced alert_conf_text[] short below.
+static const char* const backend_text[] = {"FDF FW", "Maraud"};
+// "US"/"LP" + the pin pair, because the full "USART 13/14" clipped to "USART 1"
+// at rest and the pins are the half an operator actually wires. Same fixed ~40 px
+// value column as backend_text[] above.
+static const char* const port_text[] = {"US13/14", "LP15/16"};
 static const char* const onoff_text[] = {"OFF", "ON"};
 
 static const uint32_t esp_baud_val[] = {115200, 921600};
@@ -13,7 +23,8 @@ static const char* const gps_baud_text[] = {"9600", "115200", "57600"};
 
 // Index-aligned with ESP_MARAUDER_CMDS in helpers/esp_link.c.
 #define MARAUDER_CMD_COUNT 4
-static const char* const marauder_text[] = {"Probe req", "AP scan", "Beacon", "Raw"};
+// "Probe req" clipped to "Probe re". Unambiguous against the other three.
+static const char* const marauder_text[] = {"Probe", "AP scan", "Beacon", "Raw"};
 
 static uint8_t index_of_u32(const uint32_t* arr, size_t n, uint32_t val) {
     for(size_t i = 0; i < n; i++) {
@@ -191,7 +202,8 @@ static void gps_baud_changed(VariableItem* item) {
 }
 
 // Index-aligned with ReconAlertMode in helpers/alerts.h.
-static const char* const alert_text[] = {"OFF", "Vibrate", "Beep", "Beep+Vibe"};
+// "Beep+Vibe" clipped to "Beep+Vi". "Both" is exact against OFF/Vibrate/Beep.
+static const char* const alert_text[] = {"OFF", "Vibrate", "Beep", "Both"};
 
 static void alert_mode_changed(VariableItem* item) {
     ReconApp* app = variable_item_get_context(item);
@@ -226,7 +238,12 @@ static void sound_changed(VariableItem* item) {
     recon_settings_save(app);
 }
 
-static const char* const flash_speed_text[] = {"Safe 115k", "Fast 921k"};
+// NAME THE BAUD THE FLASHER ACTUALLY USES. This read "Fast 921k" while
+// recon_scene_firmware_run.c passes 230400 -- a number the app never sends,
+// printed as if it were a setting. It also did not fit: nine characters overrun
+// the VariableItemList value column, and the "<" arrow drawn for the second
+// entry landed on top of the F ("<ast 921k" on screen).
+static const char* const flash_speed_text[] = {"115k", "230k"};
 
 static void flash_fast_changed(VariableItem* item) {
     ReconApp* app = variable_item_get_context(item);
@@ -248,18 +265,31 @@ static void save_hits_changed(VariableItem* item) {
     if(!app->settings.save_hits) recon_hits_clear(app);
 }
 
-static void log_serials_changed(VariableItem* item) {
+// Auto = the hit card ages out on its own. Next hit = it holds until another
+// detection replaces it, for the case the request came from: a hit found while
+// you were watching the road rather than the screen.
+static const char* const card_text[] = {"Next hit", "Auto"};
+
+static void card_autodismiss_changed(VariableItem* item) {
     ReconApp* app = variable_item_get_context(item);
     uint8_t idx = variable_item_get_current_value_index(item);
-    app->settings.log_serials = (idx == 1);
+    app->settings.card_autodismiss = (idx == 1);
+    variable_item_set_current_value_text(item, card_text[idx]);
+    recon_settings_save(app);
+}
+
+static void esp_auto_5v_changed(VariableItem* item) {
+    ReconApp* app = variable_item_get_context(item);
+    uint8_t idx = variable_item_get_current_value_index(item);
+    app->settings.esp_auto_5v = (idx == 1);
     variable_item_set_current_value_text(item, onoff_text[idx]);
     recon_settings_save(app);
 }
 
-static void anomaly_flag_changed(VariableItem* item) {
+static void log_serials_changed(VariableItem* item) {
     ReconApp* app = variable_item_get_context(item);
     uint8_t idx = variable_item_get_current_value_index(item);
-    app->settings.anomaly_flag = (idx == 1);
+    app->settings.log_serials = (idx == 1);
     variable_item_set_current_value_text(item, onoff_text[idx]);
     recon_settings_save(app);
 }
@@ -376,22 +406,31 @@ void recon_scene_settings_on_enter(void* context) {
     variable_item_set_current_value_index(item, idx);
     variable_item_set_current_value_text(item, flash_speed_text[idx]);
 
-    // Persist detections across app restarts. OFF by default -- a hit log is a
-    // durable record of where you have been. Turning it off deletes hits.csv.
+    // Persist detections across app restarts. ON by default since v0.82: losing a
+    // drive's worth of detections was the worse failure. Turning it off deletes
+    // hits.csv, so opting out is still one switch away.
     idx = app->settings.save_hits ? 1 : 0;
     item = variable_item_list_add(list, "Save hits", 2, save_hits_changed, app);
     variable_item_set_current_value_index(item, idx);
     variable_item_set_current_value_text(item, onoff_text[idx]);
 
-    idx = app->settings.log_serials ? 1 : 0;
-    item = variable_item_list_add(list, "Log Flock serials", 2, log_serials_changed, app);
+    // Power the GPIO 5V rail for a board that never answers. ON by default,
+    // because a companion wired to the header is simply dead without it and the
+    // failure looks like a broken app rather than an unpowered board. Only ever
+    // acts on silence, so a board on its own USB is never given a second supply.
+    // How long the "what just beeped?" card stays up.
+    idx = app->settings.card_autodismiss ? 1 : 0;
+    item = variable_item_list_add(list, "Card dismiss", 2, card_autodismiss_changed, app);
+    variable_item_set_current_value_index(item, idx);
+    variable_item_set_current_value_text(item, card_text[idx]);
+
+    idx = app->settings.esp_auto_5v ? 1 : 0;
+    item = variable_item_list_add(list, "Auto 5V for ESP", 2, esp_auto_5v_changed, app);
     variable_item_set_current_value_index(item, idx);
     variable_item_set_current_value_text(item, onoff_text[idx]);
 
-    // Net Guardian: flag unidentified strong/persistent BLE devices as suspicious.
-    // Off by default -- it trades a higher false-positive rate for more coverage.
-    idx = app->settings.anomaly_flag ? 1 : 0;
-    item = variable_item_list_add(list, "Anomaly flag", 2, anomaly_flag_changed, app);
+    idx = app->settings.log_serials ? 1 : 0;
+    item = variable_item_list_add(list, "Log Flock serials", 2, log_serials_changed, app);
     variable_item_set_current_value_index(item, idx);
     variable_item_set_current_value_text(item, onoff_text[idx]);
 

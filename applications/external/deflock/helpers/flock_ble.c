@@ -37,6 +37,31 @@ FlockConfidence flock_ble_confidence(uint16_t company, const char* name, bool ra
     //   - 0x09C8 is Flock's own manufacturer id in the advert;
     //   - the Raven GATT services (0x3100-0x3500) are Raven-SPECIFIC;
     //   - "Penguin-*" / "FS Ext *" are Flock's own product naming.
+    //
+    // 0x09C8 IS FILED UNDER XUNTONG, THE BATTERY VENDOR, NOT FLOCK (see
+    // docs/signatures.md and the AXON_BLE_COMPANY_ID comment in flock_ble.h), so
+    // in principle it has the same shared-identifier shape as a WiFi OUI. It is
+    // NOT gated on corroboration anyway, and that is deliberate:
+    //
+    //   - there is no corroborator strong enough to gate on. The serial format is
+    //     one observed sample ("TN72023022000771"), no documented field offset, no
+    //     prefix/length/checksum structure, and it is KNOWN TO HAVE CHANGED (newer
+    //     firmware dropped "Penguin-" for bare digits). Any >=6 alphanumeric run
+    //     satisfies flock_ble_extract_serial -- its own test proves "LONGEST9"
+    //     passes -- so it would rule out empty payloads and nothing else.
+    //   - the cost of being wrong is asymmetric and severe. This function returns
+    //     only Confirmed(4) or Possible(1); there is no middle rung on the BLE
+    //     path. The default alert gate is Likely(2), so a demotion here is 4->1
+    //     straight THROUGH the gate: no beep, no vibro, no alert card, and
+    //     permanently, because confidence is monotonic (recon_app.c) and nothing
+    //     on this path can raise it back. A real camera would go silent.
+    //
+    // Tried and reverted on 2026-09-06 after a bench "false positive" turned out
+    // to be the emitter itself, correctly Confirmed via its Raven GATT identity
+    // and merely wearing a stale first-seen name. Do not re-add a serial-shaped
+    // gate here without a corroborator that is actually structural.
+    // flock_ble_tell() reports WHICH tell fired so a shared-id match is visible
+    // to the operator -- that is the precision answer, not a lower rung.
     if(company == FLOCK_BLE_COMPANY_ID) return FlockConfidenceConfirmed;
     // Axon's own SIG-registered company id. Vendor-exclusive like 0x09C8 -- it
     // names Axon, not a silicon vendor -- so it stands on its own for the same
@@ -44,7 +69,14 @@ FlockConfidence flock_ble_confidence(uint16_t company, const char* name, bool ra
     // class carries that distinction, this function only answers "how sure".
     if(company == AXON_BLE_COMPANY_ID) return FlockConfidenceConfirmed;
     if(raven_gatt) return FlockConfidenceConfirmed;
-    if(ci_prefix(name, "PENGUIN") || ci_contains(name, "FS EXT")) return FlockConfidenceConfirmed;
+    // Delegates to flock_ble_name_is_flock() rather than repeating the patterns.
+    // It used to inline them, and when the field-observed names (Pigvision,
+    // RWLS-, FlockCam, FS-XXXXXX) were added to the helper on 2026-09-07 this
+    // line did not learn them -- the helper went green while the function that
+    // actually scores a detection still returned Possible. Caught only because
+    // the new tests assert through flock_ble_confidence(), not through the
+    // helper. One definition, one place to extend.
+    if(flock_ble_name_is_flock(name)) return FlockConfidenceConfirmed;
 
     // Nothing Flock-specific left. The only other way the companion classifies a
     // device as Flock is an OUI prefix on the BLE address, and those prefixes are
@@ -60,6 +92,141 @@ FlockConfidence flock_ble_confidence(uint16_t company, const char* name, bool ra
     // Flock -- the same over-claim as the v0.46 "Flock-Guest" SSID bug, on the
     // BLE path, which the SSID-side guard in esp_parser.c never covered.
     return FlockConfidencePossible;
+}
+
+/**
+ * "FS-" + exactly six hex digits, the whole name -- Flock's post-"Penguin"
+ * unit-id GAP name (zmattmanz/plume, "newer naming convention").
+ *
+ * ANCHORED AND SHAPED, deliberately. A bare "FS-" prefix is two letters and
+ * would confirm a camera on any device that happens to start that way; it is
+ * the same shape of mistake as the unanchored "flock-" substring that shipped
+ * `Flock-Guest` as CONFIRMED in v0.46. Requiring the full six-hex form and
+ * nothing after it is what makes this safe to stake a Confirmed on -- the exact
+ * rule is_flock_provisioning_ssid() applies to "Flock-XXXXXX" on the Wi-Fi side.
+ */
+static bool is_fs_unit_name(const char* name) {
+    if(!name) return false;
+    if(!(ascii_upper(name[0]) == 'F' && ascii_upper(name[1]) == 'S' && name[2] == '-')) {
+        return false;
+    }
+    for(int i = 3; i < 9; i++) {
+        char c = name[i]; // '\0' (short name) is not hex -> correctly rejected
+        bool hex = (c >= '0' && c <= '9') || (ascii_upper(c) >= 'A' && ascii_upper(c) <= 'F');
+        if(!hex) return false;
+    }
+    return name[9] == '\0';
+}
+
+bool flock_ble_name_is_flock(const char* name) {
+    // Flock's own product naming. Every entry here is staked on CONFIRMED -- this
+    // function is what flock_ble_confidence() consults for the naming rung -- so
+    // the bar is "a string no ordinary device would choose", not "contains flock".
+    //
+    // NOT ADDED, on purpose: a bare "FLOCK" prefix. The BLE path has no Likely
+    // rung, so it would promote anything merely flock-ish straight to Confirmed,
+    // which is precisely the v0.46 `Flock-Guest` over-claim. The Wi-Fi side gets
+    // to score a loose "flock" substring as LIKELY; here there is no such landing
+    // spot, so loose patterns are excluded rather than softened.
+    if(ci_prefix(name, "PENGUIN") || ci_contains(name, "FS EXT")) return true;
+    // Field-observed Flock BLE names, all long and vendor-specific enough to
+    // stand alone (zmattmanz/plume, corroborated by the flock-you lineage):
+    //   PIGVISION  -- Flock's Pigvision units
+    //   FLOCKCAM   -- names the product, not the vendor family
+    //   RWLS-      -- observed as "RWLS-38:5B:44:B3:0F:5A", the unit's own MAC
+    //                 appended; the prefix alone is four letters plus a dash and
+    //                 has no ordinary-device meaning.
+    if(ci_prefix(name, "PIGVISION") || ci_prefix(name, "FLOCKCAM")) return true;
+    if(ci_prefix(name, "RWLS-")) return true;
+    return is_fs_unit_name(name);
+}
+
+/**
+ * Stock module / stack names that identify nothing about the device.
+ *
+ * ANCHORED prefixes only. Deliberately short and boring: every entry must be a
+ * name a device ships with rather than one it chose, because anything on this
+ * list can be displaced by a later advert. Nothing Flock-adjacent belongs here,
+ * and a test asserts none of these collide with a Flock-shaped name.
+ */
+static const char* const k_generic_names[] = {
+    "ESP32",
+    "ESP_",
+    "ESP-",
+    "ARDUINO",
+    "NRF",
+    "BLUETOOTH",
+    "UNKNOWN",
+    "NONAME",
+};
+
+int flock_ble_name_specificity(const char* name) {
+    if(!name || !name[0]) return 0;
+
+    // Self-identifying: Flock's own product naming, or a bare serial. The serial
+    // check is the post-2025-03 firmware case, where the GAP name IS the serial
+    // and carries no "Penguin-" prefix to recognise it by.
+    char probe[24];
+    if(flock_ble_name_is_flock(name) ||
+       flock_ble_extract_serial(NULL, 0, name, probe, sizeof(probe))) {
+        return 3;
+    }
+
+    for(size_t i = 0; i < sizeof(k_generic_names) / sizeof(k_generic_names[0]); i++) {
+        if(ci_prefix(name, k_generic_names[i])) return 1;
+    }
+    // Exact-match-only entries: too short to use as prefixes without catching
+    // real names ("BT" would swallow "BTLE-Cam-3").
+    if(ci_prefix(name, "BT") && !name[2]) return 1;
+    if(ci_prefix(name, "BLE") && !name[3]) return 1;
+
+    return 2;
+}
+
+bool flock_ble_name_should_replace(const char* current, const char* candidate) {
+    return flock_ble_name_specificity(candidate) > flock_ble_name_specificity(current);
+}
+
+FlockBleTell
+    flock_ble_tell(uint16_t company, const char* name, bool raven_gatt, const uint8_t* addr) {
+    // Mirrors flock_ble_confidence()'s precedence exactly, so the tell always
+    // explains the rung that function returned rather than describing some other
+    // signal that happened to also be present.
+    if(company == FLOCK_BLE_COMPANY_ID || company == AXON_BLE_COMPANY_ID) {
+        return FlockBleTellMfgId;
+    }
+    if(raven_gatt) return FlockBleTellRavenGatt;
+    if(flock_ble_name_is_flock(name)) return FlockBleTellNaming;
+
+    // POSITIVE identification of the shared-OUI case. Everything above is a
+    // Flock-specific tell; reaching here means the companion classified this
+    // device for some other reason, and a bare OUI on the BLE address is the one
+    // remaining path it has. Checking the address says so as a fact instead of
+    // inferring it from absence -- which matters, because "matched a shared
+    // silicon-vendor prefix" and "matched something newer than this build
+    // understands" are different statements and only one of them is weak.
+    if(addr && (flock_oui_match(addr) || soundthinking_oui_match(addr) || axon_oui_match(addr) ||
+                vendor_exclusive_oui_match(addr))) {
+        return FlockBleTellOuiOnly;
+    }
+    return FlockBleTellNone;
+}
+
+const char* flock_ble_tell_str(FlockBleTell tell) {
+    // TERSE: composed into the detail screen's "Method:" row, which leaves about
+    // 26 characters next to a scrollbar on a 128 px display.
+    switch(tell) {
+    case FlockBleTellMfgId:
+        return "BLE mfg";
+    case FlockBleTellRavenGatt:
+        return "BLE GATT";
+    case FlockBleTellNaming:
+        return "BLE name";
+    case FlockBleTellOuiOnly:
+        return "BLE OUI";
+    default:
+        return "BLE";
+    }
 }
 
 bool flock_ble_extract_serial(
@@ -157,7 +324,7 @@ FlockBleModel flock_ble_model_ex(const char* serial, const char* name, bool rave
     // external battery stays FlockBleModelGeneric.
     (void)serial;
 
-    if(name && (ci_prefix(name, "PENGUIN") || ci_prefix(name, "FS EXT"))) {
+    if(flock_ble_name_is_flock(name)) {
         return FlockBleModelGeneric;
     }
     if(serial && serial[0]) {

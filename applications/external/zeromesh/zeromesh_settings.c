@@ -1,4 +1,5 @@
 #include "zeromesh_settings.h"
+#include "zeromesh_rtttl.h"
 #include <storage/storage.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,7 +11,7 @@ void settings_save(ZeroMeshApp* app) {
 
     Storage* storage = furi_record_open(RECORD_STORAGE);
 
-    storage_common_mkdir(storage, "/ext/zeromesh");
+    storage_common_mkdir(storage, APP_DATA_PATH(""));
 
     File* file = storage_file_alloc(storage);
 
@@ -18,6 +19,9 @@ void settings_save(ZeroMeshApp* app) {
         char line[64];
 
         snprintf(line, sizeof(line), "version=%d\n", SETTINGS_VERSION);
+        storage_file_write(file, line, strlen(line));
+
+        snprintf(line, sizeof(line), "transport=%d\n", (int)app->transport);
         storage_file_write(file, line, strlen(line));
 
         snprintf(line, sizeof(line), "uart_id=%d\n", (int)app->uart_id);
@@ -32,8 +36,17 @@ void settings_save(ZeroMeshApp* app) {
         snprintf(line, sizeof(line), "led=%d\n", app->notify_led ? 1 : 0);
         storage_file_write(file, line, strlen(line));
 
-        snprintf(line, sizeof(line), "ringtone=%d\n", (int)app->notify_ringtone);
+        int builtin = app->notify_ringtone < RINGTONE_COUNT ? (int)app->notify_ringtone : 1;
+        snprintf(line, sizeof(line), "ringtone=%d\n", builtin);
         storage_file_write(file, line, strlen(line));
+
+        if(app->notify_ringtone >= RINGTONE_COUNT) {
+            uint16_t i = app->notify_ringtone - RINGTONE_COUNT;
+            if(i < app->custom_count) {
+                snprintf(line, sizeof(line), "ringtone_file=%s\n", app->custom_files[i]);
+                storage_file_write(file, line, strlen(line));
+            }
+        }
 
         snprintf(line, sizeof(line), "scroll_speed=%d\n", app->scroll_speed);
         storage_file_write(file, line, strlen(line));
@@ -57,8 +70,11 @@ void settings_load(ZeroMeshApp* app) {
     Storage* storage = furi_record_open(RECORD_STORAGE);
     File* file = storage_file_alloc(storage);
 
-    if(storage_file_open(file, SETTINGS_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
-        char buffer[256];
+    const char* path = SETTINGS_PATH;
+    if(!storage_file_exists(storage, path)) path = SETTINGS_PATH_OLD;
+
+    if(storage_file_open(file, path, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        char buffer[512];
         uint16_t bytes_read = storage_file_read(file, buffer, sizeof(buffer) - 1);
         buffer[bytes_read] = '\0';
 
@@ -82,7 +98,11 @@ void settings_load(ZeroMeshApp* app) {
                     char* value_str = equals + 1;
                     int value = atoi(value_str);
 
-                    if(strcmp(key, "uart_id") == 0) {
+                    if(strcmp(key, "transport") == 0) {
+                        if(value >= 0 && value < ZmTransportCount) {
+                            app->transport = (ZmTransport)value;
+                        }
+                    } else if(strcmp(key, "uart_id") == 0) {
                         app->uart_id = (FuriHalSerialId)value;
                     } else if(strcmp(key, "baud") == 0) {
                         app->baud = (uint32_t)value;
@@ -92,8 +112,11 @@ void settings_load(ZeroMeshApp* app) {
                         app->notify_led = (value != 0);
                     } else if(strcmp(key, "ringtone") == 0) {
                         if(value >= 0 && value < RINGTONE_COUNT) {
-                            app->notify_ringtone = (RingtoneType)value;
+                            app->notify_ringtone = (uint16_t)value;
                         }
+                    } else if(strcmp(key, "ringtone_file") == 0) {
+                        int16_t idx = ringtone_index_of(app, value_str);
+                        if(idx >= 0) app->notify_ringtone = (uint16_t)idx;
                     } else if(strcmp(key, "scroll_speed") == 0) {
                         if(value >= 1 && value <= 10) {
                             app->scroll_speed = (uint8_t)value;

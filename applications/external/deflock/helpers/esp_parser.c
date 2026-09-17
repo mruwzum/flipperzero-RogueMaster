@@ -3,6 +3,7 @@
 #include "esp_parser.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 int esp_hexval(char c) {
@@ -90,7 +91,13 @@ static EspMsgType parse_flock(char** f, int n, EspMsg* out) {
     // add more, so unknown keys are skipped rather than treated as an error.
     //   fp=<hex32>  B1 IE-skeleton fingerprint (probe requests only)
     //   cls=a       device class: acoustic (SoundThinking).
-    //   cls=x       device class: Axon body-worn / in-car police equipment.
+    //   cls=x       device class: Axon police equipment (body, in-car OR the
+    //               fixed Outpost/Lightpost ALPR -- one OUI covers all of them).
+    //   cls=g       device class: vendor-exclusive competitor gear -- vendor
+    //               known (Ubicquia / Motorola Solutions / Verkada / Genetec /
+    //               Avigilon), KIND not determined. The vendor itself is NOT on
+    //               the wire: this side re-derives it from the MAC, so it cannot
+    //               inherit an attribution from firmware that lags the app.
     //               Absent, or a letter this build does not know, means fall
     //               back to the class implied by the MAC's own OUI.
     //   hid=1       the AP beacons but withholds its SSID.
@@ -101,6 +108,7 @@ static EspMsgType parse_flock(char** f, int n, EspMsg* out) {
     // Start at f[7] (AFTER the ssid at f[6]) so an SSID that literally begins
     // "fp=" or "cls=" can't be misread as one of these fields.
     uint32_t fp = 0;
+    bool sig_hit = false;
     bool hidden = false;
     uint8_t probe_rate = 0;
     // Default the class from the MAC's own OUI rather than assuming ALPR: that
@@ -109,7 +117,14 @@ static EspMsgType parse_flock(char** f, int n, EspMsg* out) {
     FlockDevClass dev_class = flock_class_from_mac(mac);
     for(int i = 7; i < n; i++) {
         if(strncmp(f[i], "fp=", 3) == 0) {
+            // "fp2=" is NOT read here, deliberately. A detection is scored by
+            // sg= and fp=; the content hash is a COLLECTION field and its only
+            // consumer is survey.csv, which gets it from the SV line. Parsing it
+            // here too would store a value nothing reads, on every row of a
+            // 64-entry table, for a table of fp2 signatures that ships empty.
             fp = (uint32_t)strtoul(f[i] + 3, NULL, 16);
+        } else if(strncmp(f[i], "sg=", 3) == 0) {
+            sig_hit = (f[i][3] == '1');
         } else if(strncmp(f[i], "cls=", 4) == 0) {
             // Unknown letters fall back to the MAC-derived class rather than to
             // ALPR: a newer companion may name a class this build predates, and
@@ -119,6 +134,8 @@ static EspMsgType parse_flock(char** f, int n, EspMsg* out) {
                 dev_class = FlockClassAcoustic;
             else if(f[i][4] == 'x')
                 dev_class = FlockClassBodycam;
+            else if(f[i][4] == 'g')
+                dev_class = FlockClassGear;
             else if(f[i][4] == 'c')
                 dev_class = FlockClassAlpr;
         } else if(strncmp(f[i], "hid=", 4) == 0) {
@@ -146,11 +163,37 @@ static EspMsgType parse_flock(char** f, int n, EspMsg* out) {
                                                          FlockConfidenceProbeFp;
         if(fp_conf > conf) conf = fp_conf;
         ftype = 'F'; // source label "probe-fp" in the detail scene
-    } else if(fp_src == FlockIeFpUser) {
-        // UNVERIFIED user fp (signatures.json): a candidate device-CLASS match ONLY
-        // -- capped at "Class?", never Confirmed even with a Flock OUI.
+    } else if(fp_src == FlockIeFpCandidate || fp_src == FlockIeFpUser) {
+        // Single-source built-in candidate, or an UNVERIFIED user fp
+        // (signatures.json). Either way a candidate device-CLASS match ONLY --
+        // capped at "Class?", never Confirmed even with a Flock OUI. Promotion of
+        // a candidate to the auto-confirming builtin table requires a second
+        // independent capture (see flock_ie_fps_candidate[] in flock_db.c).
         if(FlockConfidenceProbeFp > conf) conf = FlockConfidenceProbeFp;
         ftype = 'F';
+    }
+
+    // COMMUNITY PROBE SIGNATURE. The companion matched the whole IE signature
+    // against its published table and said so with sg=1; it deliberately did not
+    // raise its own score, because conf=3 on that wire means CONFIRMED.
+    //
+    // THIS IS THE ONE TELL THAT FIRES ON A RANDOMISED ADDRESS, so it is also the
+    // only rung that can produce a detection with no OUI behind it at all -- the
+    // companion now lets such a frame past its conf==0 gate purely on this.
+    //
+    // Capped at "Class?" for the same reason a candidate fingerprint is: it is
+    // single-source (one contributor, one geography, drive-tested by one
+    // project), and being right 11 times out of 12 is not the same as being
+    // proof. A Flock OUI underneath does NOT lift it, because then the OUI rungs
+    // above have already had their say.
+    if(sig_hit) {
+        if(FlockConfidenceProbeFp > conf) conf = FlockConfidenceProbeFp;
+        // 'S', not 'F', and only when a real fingerprint did not already claim
+        // the row. Both sit at the same rung, but they are different evidence
+        // and the detail screen names them separately -- a hit the operator can
+        // only have got from the signature must not say "IE fp", which they
+        // could then go looking for in signatures.json and never find.
+        if(ftype != 'F') ftype = 'S';
     }
 
     memcpy(out->u.flock.mac, mac, 6);
@@ -180,6 +223,7 @@ static EspMsgType parse_ble(char** f, int n, EspMsg* out) {
     size_t mfg_len = 0;
     bool raven_gatt = false;
     bool tracker_separated = false;
+    bool bwc_tag = false;
     for(int fi = 6; fi < n; fi++) {
         const char* t = f[fi];
         if(strchr(t, '=')) {
@@ -187,6 +231,8 @@ static EspMsgType parse_ble(char** f, int n, EspMsg* out) {
                 raven_gatt = true;
             else if(strcmp(t, "sep=1") == 0)
                 tracker_separated = true;
+            else if(strcmp(t, "bwc=1") == 0)
+                bwc_tag = true;
         } else if(mfg_len == 0) {
             for(size_t i = 0; mfg_len < sizeof(mfg); i += 2) {
                 int hi = esp_hexval(t[i]);
@@ -207,6 +253,7 @@ static EspMsgType parse_ble(char** f, int n, EspMsg* out) {
     out->u.ble.mfg_len = mfg_len;
     out->u.ble.raven_gatt = raven_gatt;
     out->u.ble.tracker_separated = tracker_separated;
+    out->u.ble.bwc_tag = bwc_tag;
     return EspMsgBleDev;
 }
 
@@ -215,10 +262,15 @@ EspMsgType esp_parse_companion_line(char* line, EspMsg* out) {
     out->type = EspMsgIgnore;
 
     if(strncmp(line, "FLOCKCO", 7) == 0) {
-        // FLOCKCO,<ver> -- the companion's wire-protocol version (absent on old FW).
-        char* f[2];
-        int n = esp_split_fields(line, f, 2);
+        // FLOCKCO,<proto>[,<build>] -- the wire-protocol version, then the
+        // companion's own build version. Both optional: firmware older than
+        // either simply sends fewer fields.
+        char* f[3];
+        int n = esp_split_fields(line, f, 3);
         out->u.banner.version = (n >= 2) ? (uint8_t)atoi(f[1]) : 0;
+        if(n >= 3 && f[2][0]) {
+            snprintf(out->u.banner.build, sizeof(out->u.banner.build), "%s", f[2]);
+        }
         out->type = EspMsgBanner;
         return out->type;
     }
@@ -345,13 +397,68 @@ EspMsgType esp_parse_companion_line(char* line, EspMsg* out) {
         out->type = EspMsgBleEnd;
         return out->type;
     }
+    // SV,<mac12>,<rssi>,<ch>,<fp8hex>,<count>  one wildcard-probe transmitter,
+    // matched or not. SVBEGIN/SVEND bracket a dump and carry nothing themselves.
+    if(strncmp(line, "SV,", 3) == 0) {
+        // Split into EIGHT, not six: fields 7 and 8 (fp2 and the printable
+        // signature) were appended in v0.96 and older firmware simply stops at
+        // six. The signature is LAST on the line because it contains commas --
+        // esp_split_fields stops once it has filled the array, so f[7] is the
+        // whole remainder rather than one comma-delimited piece of it.
+        char* f[8];
+        int n = esp_split_fields(line, f, 8);
+        if(n < 6) return (out->type = EspMsgIgnore);
+        uint8_t mac[6];
+        if(!parse_mac_compact(f[1], mac)) return (out->type = EspMsgIgnore);
+        memcpy(out->u.survey.mac, mac, 6);
+        out->u.survey.rssi = (int8_t)atoi(f[2]);
+        out->u.survey.channel = (uint8_t)atoi(f[3]);
+        out->u.survey.fp = (uint32_t)strtoul(f[4], NULL, 16);
+        out->u.survey.count = (uint16_t)atoi(f[5]);
+        out->u.survey.fp2 = (n >= 7) ? (uint32_t)strtoul(f[6], NULL, 16) : 0u;
+        out->u.survey.sig = (n >= 8) ? f[7] : "";
+        return (out->type = EspMsgSurvey);
+    }
+
+    // RID,<addr12>,<rssi>,<hex>  one ASTM F3411 Remote ID broadcast. The hex is
+    // the BLE service data starting at the 0x0D application code; it is carried
+    // across verbatim and decoded by helpers/open_drone_id.c.
+    if(strncmp(line, "RID,", 4) == 0) {
+        char* f[4];
+        int n = esp_split_fields(line, f, 4);
+        if(n < 4) return (out->type = EspMsgIgnore);
+        uint8_t addr[6];
+        if(!parse_mac_compact(f[1], addr)) return (out->type = EspMsgIgnore);
+        memcpy(out->u.rid.addr, addr, 6);
+        out->u.rid.rssi = (int8_t)atoi(f[2]);
+        size_t len = 0;
+        const char* t = f[3];
+        // Stop on the first non-hex or odd trailing nibble rather than guessing
+        // at it -- a half-decoded advert is worse than a dropped one, because the
+        // decoder downstream would read real fields out of invented bytes.
+        for(size_t i = 0; len < sizeof(out->u.rid.payload); i += 2) {
+            int hi = esp_hexval(t[i]);
+            if(hi < 0) break;
+            int lo = esp_hexval(t[i + 1]);
+            if(lo < 0) break;
+            out->u.rid.payload[len++] = (uint8_t)((hi << 4) | lo);
+        }
+        if(len == 0) return (out->type = EspMsgIgnore);
+        out->u.rid.payload_len = len;
+        return (out->type = EspMsgRemoteId);
+    }
+
     if(strncmp(line, "BLE,", 4) == 0) {
-        // BLE,<addr>,<rssi>,<cat>,<company>,<name>[,<mfghex>][,rv=1][,sep=1].
-        // 9 slots hold the 6 base fields plus all three optional trailers
-        // (either order, either absent), so no trailer gets folded back into
-        // <name>.
-        char* f[9];
-        int n = esp_split_fields(line, f, 9);
+        // BLE,<addr>,<rssi>,<cat>,<company>,<name>[,<mfghex>][,rv=1][,sep=1][,bwc=1].
+        // 10 slots hold the 6 base fields plus all FOUR optional trailers (any
+        // order, any absent), so no trailer gets folded back into <name>.
+        //
+        // GROW THIS WITH EVERY NEW TRAILER. esp_split_fields() stops splitting at
+        // `max`, so a short array does not drop the extra token -- it glues it
+        // onto the previous one, where the `key=` check then misses it silently.
+        // bwc=1 was the fourth trailer and needed this bumped from 9.
+        char* f[10];
+        int n = esp_split_fields(line, f, 10);
         return (out->type = parse_ble(f, n, out));
     }
     if(line[0] == 'W' && line[1] == ',') {

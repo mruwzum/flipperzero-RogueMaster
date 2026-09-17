@@ -202,17 +202,35 @@ the games stay in sync.
 
 ## Install
 
-**You only need `hotspot_arcade.fap`.** Grab it from the
+**You need one `.fap`, and only one.** Grab it from the
 [latest release](https://github.com/tarikbc/hotspot-arcade/releases/latest) and drop it in
 `/ext/apps/GPIO/` on the SD card (qFlipper, or the Flipper's own file manager). No SD
 setup, no separate downloads: the ESP firmware, the phone game bundle, and the content
-packs all ship inside the .fap.
+packs all ship inside it.
 
-> **First launch can take up to 3 minutes.** The .fap carries about 3 MB of bundled
-> content (three board firmwares, the web bundle, the packs) and the Flipper unpacks it to
-> the SD card the first time you open the app (and again after an update). The hourglass is
-> the system loader doing that, not a hang, so give it a minute or two. Every launch after
-> that is instant.
+Which one depends on whether you know your board:
+
+- **`hotspot_arcade-all.fap`** carries firmware for all three boards, so **Install Firmware**
+  can flash whichever one you plug in and you can switch boards later. Pick this if you are
+  not sure.
+- **`hotspot_arcade-s2.fap`**, **`-wroom.fap`** or **`-c5.fap`** carry only that board's
+  firmware. Much smaller, and a much faster first launch. The board picker only offers the
+  board that is actually in the download.
+
+Do not install more than one. They all appear in the menu under the same name, so you
+cannot tell them apart, and each unpacks its own copy of the bundled content to the SD card.
+
+> **The app's SD folders are named after the `.fap` file.** `hotspot_arcade-all.fap` uses
+> `/ext/apps_data/hotspot_arcade-all/`, `-s2` uses `hotspot_arcade-s2`, and so on. If you
+> add your own content (see [Custom content](#custom-content)) and later switch to a
+> different `.fap`, move your folder across or the app will not find it.
+
+> **First launch takes a while**, and longer for `-all`. The .fap carries its bundled
+> content (board firmware, the web bundle, the packs) and the Flipper unpacks it to the SD
+> card the first time you open the app, and again after an update. `-all` carries about 3 MB
+> of it and can sit on the hourglass for a couple of minutes; a single-board build is a
+> third of that. It is the system loader working, not a hang. Every launch after that is
+> instant.
 
 Then, on the Flipper: **Apps → GPIO → [ESP32] Hotspot Arcade**.
 
@@ -231,9 +249,11 @@ Prefer a computer? `firmware-merged.bin` on the release flashes at `0x0` with es
 
 ### Custom content
 
-The bundled web bundle and content packs live in `/ext/apps_assets/hotspot_arcade/`, which
-the loader rewrites from the .fap on every launch. To add your own, use
-`/ext/apps_data/hotspot_arcade/` instead, which is never touched:
+The bundled web bundle and content packs live in `/ext/apps_assets/<fap name>/`, which the
+loader rewrites from the .fap on every launch. To add your own, use
+`/ext/apps_data/<fap name>/` instead, which is never touched. Both folders are named after
+the `.fap` file: the app-catalog install uses `hotspot_arcade`, and the release downloads
+use `hotspot_arcade-all`, `hotspot_arcade-s2`, and so on.
 
 - `packs/<game>/*.txt` — your packs are offered alongside the bundled ones (yours win a
   name clash). One directory per game, e.g. `packs/trivia/`.
@@ -248,7 +268,7 @@ Full commands and gotchas are in [CLAUDE.md](CLAUDE.md); the short version:
 cd web && node build.mjs        # -> web/dist/{index.html.gz, manifest.json}
 ```
 
-**2. ESP32 firmware** (arduino-cli, esp32 core 2.0.17 for S2/WROOM and 3.x for the C5,
+**2. ESP32 firmware** (arduino-cli, esp32 core 3.3.11 for every board,
 vendored libs in `esp32/libs`). One sketch, built once per supported board —
 `tools/build-fap.sh` does them all for you, or by hand:
 ```sh
@@ -266,11 +286,18 @@ arduino-cli compile --fqbn esp32:esp32:esp32c5:PartitionScheme=huge_app,CDCOnBoo
 **3. Flipper app** — use the wrapper, not bare `ufbt`: it refreshes the bundled firmware
 images, web bundle, and content packs inside `assets/` before packaging.
 ```sh
-tools/build-fap.sh                         # -> dist/hotspot_arcade.fap
+tools/build-fap.sh                         # -> dist/hotspot_arcade-all.fap
 python3 tools/deploy-to-flipper.py --port /dev/cu.usbmodemflip_XXXX
 ```
+
+To build board specific .faps with this method, use this syntax.
+```sh
+BOARD=wroom tools/build-fap.sh              # -> dist/hotspot_arcade-wroom.fap
+python3 tools/deploy-to-flipper.py --port /dev/cu.usbmodemflip_XXXX --fap flipper/hotspot-arcade/dist/hotspot_arcade-wroom.fap
+```
+
 The deploy script pushes the fap to `/ext/apps/GPIO/` and your working copies of the web
-bundle and content packs to `/ext/apps_data/hotspot_arcade/`, where they override the
+bundle and content packs to `/ext/apps_data/[fap_name]/`, where they override the
 bundled ones — so you can iterate on the web client without rebuilding the fap.
 
 ## Development
@@ -317,7 +344,7 @@ game (`trivia/`, `wyr/`, `scramble/`, `draw/`, `spectrum/`, `kmk/`, `spyfall/`).
 keys are per game — e.g. Trivia uses `Q:`, `A:`-`D:` and `Answer:`; Would You Rather uses
 `A:` / `B:`; Word Scramble and Draw &amp; Guess use `Word:`; Spyfall uses `Loc:` plus one
 `R:` line per role. Packs ship inside the .fap; drop your own
-into `/ext/apps_data/hotspot_arcade/packs/<game>/` to add to them (yours win a name
+into `/ext/apps_data/<fap name>/packs/<game>/` to add to them (yours win a name
 clash). See [packs/README.md](packs/README.md).
 
 **Languages.** The host picks a language in Settings, and both the phone UI and the game

@@ -17,7 +17,7 @@ App(
     fap_category="Games",
     fap_author="Endika",
     fap_weburl="https://github.com/Endika/flipper-avocado-zero",
-    fap_version="0.1.0",
+    fap_version="0.1.1",
     fap_description="Avocado pit care sim: clean water, grow roots, avoid grime.",
     # cdefines=["AVOCADO_QA_MODE=1"]
 )

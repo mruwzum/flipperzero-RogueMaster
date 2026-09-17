@@ -1,0 +1,29 @@
+# Dungeons & Dolphins SRD 5.2.1 species/subchoice names.
+Black Dragonborn
+Blue Dragonborn
+Brass Dragonborn
+Bronze Dragonborn
+Copper Dragonborn
+Gold Dragonborn
+Green Dragonborn
+Red Dragonborn
+Silver Dragonborn
+White Dragonborn
+Dwarf
+Drow Elf
+High Elf
+Wood Elf
+Forest Gnome
+Rock Gnome
+Cloud Giant Goliath
+Fire Giant Goliath
+Frost Giant Goliath
+Hill Giant Goliath
+Stone Giant Goliath
+Storm Giant Goliath
+Halfling
+Human
+Orc
+Abyssal Tiefling
+Chthonic Tiefling
+Infernal Tiefling

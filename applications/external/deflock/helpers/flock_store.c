@@ -3,6 +3,7 @@
 #include "flock_store.h"
 #include "report_escape.h" // csv_field_escape (the write direction)
 #include "report_fmt.h" // fmt_mac / fmt_coord
+#include "flock_db.h" // flock_ie_fp_is_generic
 
 #include <math.h>
 #include <stdio.h>
@@ -139,22 +140,51 @@ size_t flock_store_fmt_line(char* out, size_t out_len, const FlockStoreRec* r) {
     char ssid_esc[ESC_SSID_MAX];
     csv_field_escape(ssid_flat, ssid_esc, sizeof(ssid_esc));
 
+    // Same flatten-then-escape as the SSID. The label is operator-typed, so it is
+    // every bit as capable of carrying a comma, a quote or a control character
+    // into the middle of a record.
+    char label_flat[FLOCK_STORE_LABEL_LEN];
+    size_t li = 0;
+    for(; li < FLOCK_STORE_LABEL_LEN - 1 && r->label[li]; li++) {
+        unsigned char c = (unsigned char)r->label[li];
+        label_flat[li] = (c < 0x20 || c == 0x7F) ? ' ' : (char)c;
+    }
+    label_flat[li] = '\0';
+
+    char label_esc[ESC_SSID_MAX];
+    csv_field_escape(label_flat, label_esc, sizeof(label_esc));
+
     // Empty field for "no fix", so a reader can tell an absent coordinate from
     // a real 0,0 out in the Gulf of Guinea.
     char lat_s[16], lon_s[16], head_s[16];
     fmt_coord(lat_s, sizeof(lat_s), r->lat, "");
     fmt_coord(lon_s, sizeof(lon_s), r->lon, "");
     fmt_coord(head_s, sizeof(head_s), r->heading, "");
+    // Remote ID operator position, same empty-means-absent convention.
+    char op_lat_s[16], op_lon_s[16];
+    fmt_coord(op_lat_s, sizeof(op_lat_s), r->op_lat, "");
+    fmt_coord(op_lon_s, sizeof(op_lon_s), r->op_lon, "");
 
     // ftype is one of a small known set; anything else is written as empty
     // rather than risking a comma or quote landing mid-record.
+    //
+    // 'S' (community probe-signature match) HAS TO BE IN THIS SET. It was added
+    // to the parser and to flock_method_of() without being added here, and the
+    // whitelist silently wrote it out as empty -- so a signature detection
+    // survived a save/load cycle with no frame type at all and its detail screen
+    // reverted to the generic "ESP probe rule". Found on the bench by reading
+    // hits.csv, not by any test: every layer in between was individually right.
+    //
+    // Any NEW letter needs adding here too. That is easy to miss precisely
+    // because nothing breaks loudly -- the row still loads, it just quietly
+    // forgets what it was.
     char ft[2] = {0, 0};
-    if(r->ftype && strchr("PBROFL", r->ftype)) ft[0] = r->ftype;
+    if(r->ftype && strchr("PBROFLS", r->ftype)) ft[0] = r->ftype;
 
     int n = snprintf(
         out,
         out_len,
-        "%s,%s,%d,%u,%s,%u,%08lx,%s,%s,%s,%lu,%u,%lu,%u,%u\n",
+        "%s,%s,%d,%u,%s,%u,%08lx,%s,%s,%s,%lu,%u,%lu,%u,%u,%s,%s,%s,%u\n",
         mac_s,
         ssid_esc,
         r->rssi,
@@ -166,10 +196,18 @@ size_t flock_store_fmt_line(char* out, size_t out_len, const FlockStoreRec* r) {
         lon_s,
         head_s,
         (unsigned long)r->count,
-        r->marked ? 1u : 0u,
+        // Bit field, not a bool: bit 0 keeps the original "marked" meaning so an
+        // older build still reads a confirmed-only row as marked rather than
+        // rejecting it.
+        (unsigned)((r->marked ? FLOCK_STORE_MARK_REPORT : 0u) |
+                   (r->confirmed ? FLOCK_STORE_MARK_CONFIRMED : 0u)),
         (unsigned long)r->epoch,
         r->dev_class,
-        r->hidden ? 1u : 0u);
+        r->hidden ? 1u : 0u,
+        label_esc,
+        op_lat_s,
+        op_lon_s,
+        r->ua_type);
 
     if(n < 0 || (size_t)n >= out_len) {
         if(out_len) out[0] = '\0';
@@ -184,6 +222,12 @@ bool flock_store_parse_line(const char* line, FlockStoreRec* out) {
     // Build into a scratch record so a failure part-way leaves *out untouched.
     FlockStoreRec r;
     memset(&r, 0, sizeof(r));
+    // NAN, NOT the memset's 0. A pre-v4 file carries no operator position, and
+    // 0/0 is a real point in the Gulf of Guinea -- leaving these zeroed made the
+    // detail screen render "Pilot lat: 0.00000" as if it were a fix. lat/lon/
+    // heading are overwritten unconditionally below, so they need no such guard.
+    r.op_lat = NAN;
+    r.op_lon = NAN;
 
     // Strip a trailing CRLF/LF without mutating the caller's buffer: the field
     // reader stops at NUL, so copy into a bounded local first.
@@ -207,7 +251,9 @@ bool flock_store_parse_line(const char* line, FlockStoreRec* out) {
     if(*p != '\0') return false; // more columns than the schema allows
     // Exactly a v2 line, or exactly a v1 line (v2 minus the trailing class).
     // Any other count is a malformed record, not a version we tolerate.
-    if(ncols != FLOCK_STORE_COLS && ncols != FLOCK_STORE_COLS_V1) return false;
+    if(ncols != FLOCK_STORE_COLS && ncols != FLOCK_STORE_COLS_V3 && ncols != FLOCK_STORE_COLS_V2 &&
+       ncols != FLOCK_STORE_COLS_V1)
+        return false;
 
     if(!fs_parse_mac(f[0], r.mac)) return false;
 
@@ -223,7 +269,11 @@ bool flock_store_parse_line(const char* line, FlockStoreRec* out) {
     r.channel = (uint8_t)u;
 
     if(f[4][0] != '\0') {
-        if(f[4][1] != '\0' || !strchr("PBROFL", f[4][0])) return false;
+        // Keep this set IDENTICAL to the writer's above. They were out of step
+        // for exactly one change ('S'), and the two whitelists fail in opposite
+        // directions: the writer silently blanks an unknown letter, the reader
+        // silently rejects the whole row. Neither says anything.
+        if(f[4][1] != '\0' || !strchr("PBROFLS", f[4][0])) return false;
         r.ftype = f[4][0];
     }
 
@@ -240,6 +290,14 @@ bool flock_store_parse_line(const char* line, FlockStoreRec* out) {
         unsigned long h = strtoul(f[6], &end, 16);
         if(!end || *end != '\0') return false;
         r.ie_fp = (uint32_t)h;
+        // A fingerprint since discredited as a commodity scan pattern is dropped
+        // on the way in. The ROW stays -- it is the operator's record of a real
+        // sighting and deleting their history is not ours to do -- but the hash
+        // stops being shown as the reason for it, and flock_method_of() then
+        // re-derives an honest method instead of claiming "IE fp". Without this
+        // the denylist only ever protected NEW sightings, and any card carrying
+        // one from before kept displaying it as evidence forever.
+        if(flock_ie_fp_is_generic(r.ie_fp)) r.ie_fp = 0;
     }
 
     if(!fs_parse_coord(f[7], &r.lat)) return false;
@@ -248,19 +306,41 @@ bool flock_store_parse_line(const char* line, FlockStoreRec* out) {
 
     if(!fs_parse_u32(f[10], &r.count)) return false;
 
-    if(!fs_parse_u32(f[11], &u) || u > 1) return false;
-    r.marked = (u != 0);
+    // Bit field since v3. A v1/v2 file only ever held 0 or 1, which still reads
+    // correctly as "marked, not confirmed".
+    if(!fs_parse_u32(f[11], &u) || u > (FLOCK_STORE_MARK_REPORT | FLOCK_STORE_MARK_CONFIRMED))
+        return false;
+    r.marked = (u & FLOCK_STORE_MARK_REPORT) != 0;
+    r.confirmed = (u & FLOCK_STORE_MARK_CONFIRMED) != 0;
 
     if(!fs_parse_u32(f[12], &r.epoch)) return false;
 
     // v2 only. A v1 line stops at 13 columns and keeps the memset defaults of 0
     // -- FlockClassAlpr and hidden-never-observed, which is what every v1
     // detection actually was.
-    if(ncols == FLOCK_STORE_COLS) {
+    if(ncols == FLOCK_STORE_COLS || ncols == FLOCK_STORE_COLS_V3 || ncols == FLOCK_STORE_COLS_V2) {
         if(!fs_parse_u32(f[13], &u) || u > FLOCK_STORE_MAX_DEV_CLASS) return false;
         r.dev_class = (uint8_t)u;
         if(!fs_parse_u32(f[14], &u) || u > 1) return false;
         r.hidden = (u != 0);
+    }
+    // v4 only: the Remote ID tail. Anything older keeps op_lat/op_lon at NAN --
+    // set by the caller's memset-then-init, NOT left at 0, because 0/0 is a real
+    // location and would draw a pilot marker in the Gulf of Guinea.
+    if(ncols == FLOCK_STORE_COLS) {
+        if(!fs_parse_coord(f[16], &r.op_lat)) return false;
+        if(!fs_parse_coord(f[17], &r.op_lon)) return false;
+        if(!fs_parse_u32(f[18], &u) || u > 15u) return false; // OdidUaType is a nibble
+        r.ua_type = (uint8_t)u;
+    }
+
+    // v3 and later. A v1/v2 line stops short and keeps the empty label, which is
+    // exactly what those files meant: the operator never named this device.
+    if(ncols == FLOCK_STORE_COLS || ncols == FLOCK_STORE_COLS_V3) {
+        // Precision, not a bare %s: f[] is an escaped-SSID-sized buffer and the
+        // label is deliberately shorter, so the compiler rightly flags the
+        // unbounded form under -Werror=format-truncation.
+        snprintf(r.label, sizeof(r.label), "%.*s", (int)(sizeof(r.label) - 1), f[15]);
     }
 
     *out = r;
@@ -269,7 +349,8 @@ bool flock_store_parse_line(const char* line, FlockStoreRec* out) {
 
 bool flock_store_schema_supported(const char* line) {
     if(!line) return false;
-    return strcmp(line, FLOCK_STORE_SCHEMA) == 0 || strcmp(line, FLOCK_STORE_SCHEMA_V1) == 0;
+    return strcmp(line, FLOCK_STORE_SCHEMA) == 0 || strcmp(line, FLOCK_STORE_SCHEMA_V3) == 0 ||
+           strcmp(line, FLOCK_STORE_SCHEMA_V2) == 0 || strcmp(line, FLOCK_STORE_SCHEMA_V1) == 0;
 }
 
 bool flock_store_evict_better(uint8_t conf_a, uint32_t epoch_a, uint8_t conf_b, uint32_t epoch_b) {

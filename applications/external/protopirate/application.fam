@@ -18,6 +18,8 @@ _ENABLE_EMULATE = ProtoPirateDefineEnabled("ENABLE_EMULATE_FEATURE")
 
 _MAIN_APP_SOURCES = [
     "*.c*",
+    "!helpers/protopirate_models.c",
+    "!helpers/variable_item_list.c",
     "!protocols/plugins",
     "!scenes/plugins",
     "!protocols",
@@ -56,7 +58,7 @@ App(
     fap_author="RocketGod-git & xMasterX",
     fap_weburl="https://github.com/RocketGod-git/ProtoPirate",
     #  fap_weburl="https://protopirate.net/ProtoPirate/ProtoPirate",
-    fap_version="3.2",
+    fap_version="3.3",
     fap_description="Decode car key fob signals from Sub-GHz",
 )
 
@@ -81,10 +83,10 @@ App(
         "protocols/kia_v1.c",
         "protocols/kia_v2.c",
         "protocols/mazda_v0.c",
-        "protocols/porsche_touareg.c",
         "protocols/psa.c",
         "protocols/psa_crypto.c",
         "protocols/renault_v0.c",
+        "protocols/renault_v1.c",
         "protocols/subaru.c",
         "protocols/star_line.c",
     ],
@@ -123,8 +125,8 @@ App(
         "protocols/kia_v6.c",
         "protocols/kia_v7.c",
         "protocols/mazda_v0.c",
-        "protocols/mitsubishi_v0.c",
         "protocols/psa.c",
+        "protocols/renault_v1.c",
         "protocols/psa_crypto.c",
     ],
     fal_embedded=True,
@@ -334,6 +336,13 @@ ProtoPirateTxProtocolPlugin(
     ["renault_v0.c"],
 )
 ProtoPirateTxProtocolPlugin(
+    "renault_v1",
+    "renault_v1.h",
+    "RENAULT_PROTOCOL_V1_NAME",
+    "renault_v1_protocol",
+    ["renault_v1.c"],
+)
+ProtoPirateTxProtocolPlugin(
     "star_line",
     "star_line.h",
     "SUBGHZ_PROTOCOL_STAR_LINE_NAME",
@@ -413,8 +422,25 @@ App(
         "protocols/psa_crypto.c",
         "protocols/psa_crypto_bf.c",
         "protocols/psa_bf_core.c",
+        "protocols/renault_v1.c",
         "protocols/protocols_common.c",
     ],
     fap_icon_assets="images",
+    fal_embedded=True,
+)
+
+App(
+    appid="protopirate_config_plugin",
+    apptype=FlipperAppType.PLUGIN,
+    entry_point="protopirate_config_plugin_ep",
+    requires=["proto_pirate"],
+    sources=[
+        "helpers/protopirate_protocol_plugin_host.c",
+        "helpers/protopirate_models.c",
+        "helpers/protopirate_txrx.c",
+        "helpers/variable_item_list.c",
+        "protocols/protocol_items.c",
+        "scenes/plugins/protopirate_config_plugin.c",
+    ],
     fal_embedded=True,
 )

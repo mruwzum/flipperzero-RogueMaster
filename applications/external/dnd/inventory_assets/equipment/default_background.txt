@@ -1,0 +1,24 @@
+# Dungeons & Dolphins SRD 5.2.1 starting equipment by background.
+# Catalog: SRD reads this file; official non-SRD roots are stored only in the matching _All file.
+# Currency is granted into the Inventory sidecar together with starting equipment; I rows become Item records.
+# Format: Key|I|<live item record fields> or Key|C|cp,sp,ep,gp,pp
+# Acolyte
+Acolyte|I|Holy Symbol|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Acolyte|I|Prayer Book|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Acolyte|I|Robe|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Acolyte|C|0,0,0,8,0
+# Criminal
+Criminal|I|Crowbar|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Criminal|I|Dark Common Clothes|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Criminal|I|Pouch|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Criminal|C|0,0,0,16,0
+# Sage
+Sage|I|Calligrapher Supplies|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Sage|I|Book|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Sage|I|Parchment|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Sage|C|0,0,0,8,0
+# Soldier
+Soldier|I|Gaming Set|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Soldier|I|Healer Kit|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Soldier|I|Traveler Clothes|Starting equipment||1,10,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,-1,0
+Soldier|C|0,0,0,18,0

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 ApertureFox Technology. MIT License.
 import argparse
 import struct
 import sys
@@ -27,6 +28,30 @@ COLORS = {
     15: (183, 119, 42),
 }
 UNKNOWN = (230, 0, 230)
+
+# Water is not a plain id: the byte is 0x14 | level << 5, and the odd variant
+# is falling water (flipcraft.h blockIsWater/waterLevel). A generated world
+# only ever holds sources; a played save also holds flowing levels 1..7.
+WATER_ID = 0x14
+WATER_SHALLOW = (92, 156, 216)
+WATER_DEEP = (28, 72, 138)
+
+
+def is_water(bid):
+    return (bid & 0x1E) == WATER_ID
+
+
+def water_level(bid):
+    return 0 if bid & 1 else bid >> 5
+
+
+def water_color(depth, level):
+    t = min(max(depth - 1, 0), 3) / 3.0
+    rgb = [int(a + (b - a) * t) for a, b in zip(WATER_SHALLOW, WATER_DEEP)]
+    if level:  # flowing water reads lighter than a source
+        rgb = [c + 18 + 4 * level for c in rgb]
+    return tuple(clamp(c, 0, 255) for c in rgb)
+
 
 DIGITS = {
     "-": ("000", "000", "111", "000", "000"),
@@ -76,6 +101,9 @@ def load_world(path):
         wz = meta["chunks_z"] * meta["chunk_z"]
         surf = [[0] * wx for _ in range(wz)]
         heights = [[-1] * wx for _ in range(wz)]
+        depth = [[0] * wx for _ in range(wz)]  # water blocks in the column
+        wsurf = [[-1] * wx for _ in range(wz)]  # y of the topmost water block
+        wlevel = [[0] * wx for _ in range(wz)]  # its flow level, 0 = source
         chunk_bytes = meta["chunk_x"] * meta["height"] * meta["chunk_z"] * meta["bpb"]
         for cz in range(meta["chunks_z"]):
             for cx in range(meta["chunks_x"]):
@@ -87,16 +115,28 @@ def load_world(path):
                     for lx in range(meta["chunk_x"]):
                         bid = 0
                         top = -1
+                        wet = 0
+                        wtop = -1
+                        wlvl = 0
                         for y in range(meta["height"]):
                             v = chunk[(y * meta["chunk_x"] + lz) * meta["chunk_x"] + lx]
-                            if v:
+                            if not v:
+                                continue
+                            if is_water(v):
+                                wet += 1
+                                wtop = y
+                                wlvl = water_level(v)
+                            else:
                                 bid = v
                                 top = y
                         x = cx * meta["chunk_x"] + lx
                         z = cz * meta["chunk_z"] + lz
-                        surf[z][x] = bid
+                        surf[z][x] = bid  # the ground under the water, if any
                         heights[z][x] = top
-        return meta, surf, heights, wx, wz
+                        depth[z][x] = wet
+                        wsurf[z][x] = wtop
+                        wlevel[z][x] = wlvl
+        return meta, surf, heights, depth, wsurf, wlevel, wx, wz
 
 
 def clamp(v, lo, hi):
@@ -143,10 +183,13 @@ def main():
     except ImportError:
         sys.exit("pygame is required")
 
-    meta, surf, heights, wx, wz = load_world(args.world)
+    meta, surf, heights, depth, wsurf, wlevel, wx, wz = load_world(args.world)
+    wet_columns = sum(1 for row in depth for d in row if d)
     pg.init()
     screen = pg.display.set_mode((1100, 850), pg.RESIZABLE)
-    pg.display.set_caption("Flipcraft map")
+    pg.display.set_caption(
+        f"Flipcraft map - {wx}x{wz} blocks, {wet_columns} water columns"
+    )
     clock = pg.time.Clock()
 
     tile = clamp(args.tile, MIN_TILE, MAX_TILE)
@@ -232,7 +275,14 @@ def main():
             for x in range(first_x, last_x):
                 px = int(x * tile - cam_x)
                 h = heights[z][x]
-                color = shade(COLORS.get(surf[z][x], UNKNOWN), h, meta["height"])
+                wet = depth[z][x]
+                if wet:
+                    # blue by depth, shaded by the height of the surface itself
+                    color = shade(
+                        water_color(wet, wlevel[z][x]), wsurf[z][x], meta["height"]
+                    )
+                else:
+                    color = shade(COLORS.get(surf[z][x], UNKNOWN), h, meta["height"])
                 pg.draw.rect(screen, color, (px, py, tile + 1, tile + 1))
                 if tile >= 9:
                     border = tuple(max(0, c - 34) for c in color)

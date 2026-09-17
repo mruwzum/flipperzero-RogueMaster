@@ -15,6 +15,18 @@
 // Left square the QR is scaled to fill (px). The right column holds the text.
 #define QR_AREA 52
 
+// Quiet zone kept above the module grid. The canvas is cleared white and the
+// right column starts at QR_AREA + 4, so the only border the grid needs drawn
+// for it is the one against the top edge of the screen.
+#define QR_TOP_PAD 3
+
+// Baseline pitch for the bottom text strip. FontSecondary glyphs are ~7 px tall
+// before descenders, so the old value of 6 drew every line ON TOP of the one
+// above it: all four Support addresses rendered as an unreadable smear with the
+// third chunk half off the bottom of the screen, which is exactly the case that
+// strip exists for (scan failed, type the address by hand).
+#define QR_TEXT_PITCH 8
+
 struct DeflockQrView {
     View* view;
     DeflockQrPageCallback page_cb;
@@ -51,7 +63,14 @@ static void deflock_qr_view_draw_callback(Canvas* canvas, void* _model) {
     }
 
     // Left: the QR, scaled so its module grid fills the QR_AREA square. Origin is
-    // nudged so the scaled grid is centred in the area.
+    // nudged so the scaled grid is centred in the area. qr_bottom tracks where the
+    // actual rendered grid ends (NOT the nominal QR_AREA box) -- a short URI (a
+    // donation address, a lat/lng link) encodes at well under the box's max module
+    // count, and the bottom-strip text below uses this to reclaim that slack
+    // rather than always assuming the box is full. QR_AREA is the fallback when
+    // nothing was drawn, which is the same value this always used, so that case is
+    // unchanged.
+    int qr_bottom = QR_AREA;
     if(model->has_qr && model->qr_api) {
         const QrPluginApi* qr = model->qr_api;
         int size = qr->get_size(model->qr);
@@ -59,7 +78,15 @@ static void deflock_qr_view_draw_callback(Canvas* canvas, void* _model) {
         if(scale < 1) scale = 1;
         int dim = size * scale;
         int ox = (QR_AREA - dim) / 2;
+        // VERTICAL SLACK BELONGS TO THE TEXT, NOT TO THE PADDING. Centring the
+        // grid in the QR_AREA box pushed a 33-module code down to oy=9, so the
+        // three lines below it had 16 px of canvas to share and overlapped into
+        // an unreadable smear (see the pitch comment further down). Capped at
+        // QR_TOP_PAD the code sits high, keeps a quiet zone, and hands the ~6 px
+        // it was wasting to the only part of this screen that is a fallback for
+        // the QR failing to scan.
         int oy = (QR_AREA - dim) / 2;
+        if(oy > QR_TOP_PAD) oy = QR_TOP_PAD;
         canvas_set_color(canvas, ColorBlack);
         for(int y = 0; y < size; y++) {
             for(int x = 0; x < size; x++) {
@@ -72,6 +99,7 @@ static void deflock_qr_view_draw_callback(Canvas* canvas, void* _model) {
                 }
             }
         }
+        qr_bottom = oy + dim;
     } else {
         canvas_set_font(canvas, FontSecondary);
         canvas_draw_str_aligned(canvas, QR_AREA / 2, 26, AlignCenter, AlignCenter, "QR");
@@ -97,11 +125,30 @@ static void deflock_qr_view_draw_callback(Canvas* canvas, void* _model) {
     ry += 10;
     canvas_draw_str(canvas, QR_AREA + 4, ry, model->conf);
 
-    // Bottom strip: the OSM tag summary, one line per tag. Drawn full-width below
-    // the QR area so it's readable even if the QR isn't.
-    int ty = QR_AREA + 9;
+    // Bottom strip: one line per '\n'-separated entry in `tags`, drawn full-width
+    // starting just under the rendered QR so it's readable even if the QR isn't.
+    // Was fixed at QR_AREA + 9 regardless of how small the actual QR came out --
+    // for a short URI (any of the ones either caller of this view produces) that
+    // left one, sometimes zero, full lines before hitting the canvas edge, so the
+    // "read the address by hand if the scan fails" promise a caller's comment
+    // made was never visible. qr_bottom (above) is the real edge of the drawn
+    // grid, so a small code now gets the vertical room its size actually leaves.
+    // The nominal QR_AREA is a safe UPPER bound for how tall the drawn grid could
+    // be, but the actual grid this view produces (a short donation address or a
+    // lat/lng link) always comes out well under that -- module count 29-33, not
+    // the ~49 the box is sized for -- so a fixed offset from QR_AREA left this
+    // text sitting inside empty padding while the canvas ran out of room below.
+    // qr_bottom is the real edge of what got drawn; +9 puts the first BASELINE
+    // far enough below it that the glyph tops (baseline - 7) clear the grid.
+    //
+    // Budget, measured on the device: a 33-module grid at QR_TOP_PAD ends at 36,
+    // so the baselines land on 45 / 53 / 61 and the descenders of the last line
+    // finish on 63, the last row of the screen. Three full-width 20-character
+    // chunks -- which is what every Support address wraps to, the 54-character
+    // BCH CashAddr included -- therefore fit without touching each other.
+    int ty = qr_bottom + 9;
     const char* p = model->tags;
-    while(*p && ty <= 64) {
+    while(*p && ty <= 63) {
         char line[40];
         size_t n = 0;
         while(p[n] && p[n] != '\n' && n < sizeof(line) - 1)
@@ -109,7 +156,7 @@ static void deflock_qr_view_draw_callback(Canvas* canvas, void* _model) {
         memcpy(line, p, n);
         line[n] = '\0';
         canvas_draw_str(canvas, 0, ty, line);
-        ty += 6;
+        ty += QR_TEXT_PITCH;
         p += n;
         if(*p == '\n') p++;
     }
@@ -120,10 +167,13 @@ static bool deflock_qr_view_input_callback(InputEvent* event, void* context) {
     bool handled = false;
 
     if(event->type == InputTypeShort || event->type == InputTypeRepeat) {
-        if(event->key == InputKeyLeft) {
+        // Up/Down are accepted as well as Left/Right: this view pages through a
+        // list (cameras, donation addresses), and on a Flipper that reads as
+        // "scroll" as much as it does "page". Both directions do the same thing.
+        if(event->key == InputKeyLeft || event->key == InputKeyUp) {
             if(qv->page_cb) qv->page_cb(qv->page_ctx, -1);
             handled = true;
-        } else if(event->key == InputKeyRight) {
+        } else if(event->key == InputKeyRight || event->key == InputKeyDown) {
             if(qv->page_cb) qv->page_cb(qv->page_ctx, 1);
             handled = true;
         }

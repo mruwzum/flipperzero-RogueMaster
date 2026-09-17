@@ -8,9 +8,13 @@ without rebuilding by dropping a JSON file on the Flipper's SD card at:
 apps_data/flipdeflock/signatures.json
 ```
 
-It's **load-only** (read once at app start, never written, never networked) and
-**fail-safe**: if the file is missing, empty, malformed, or oversized, the app
-silently falls back to the built-ins — a bad file can't break detection.
+**Your file is never written to** (read once at app start), nothing is ever
+networked, and it's **fail-safe**: if the file is missing, empty, malformed, or
+oversized, the app silently falls back to the built-ins, so a bad file can't
+break detection.
+
+The app does write **one** file of its own, `learned.txt`, and only when you
+explicitly confirm a detection. See [Learned fingerprints](#learned-fingerprints).
 
 Two files ship in this folder, and they are not the same thing:
 
@@ -19,6 +23,36 @@ Two files ship in this folder, and they are not the same thing:
 | [`signatures.example.json`](signatures.example.json) | A **placeholder template**. Its values (`aa:bb:cc`, `deadbeef`, …) match nothing real — copy it and replace them with your own captures. |
 | [`signatures.seed.json`](signatures.seed.json) | **Real but unverified** candidate prefixes, tracked upstream and not yet corroborated in the field. See [Seed signatures](#seed-signatures) below before you use it. |
 
+## Learned fingerprints
+
+`apps_data/flipdeflock/learned.txt` is written by the app, not by you.
+
+When you use **Confirm: I saw it** on a detection you physically looked at, its
+probe IE fingerprint is appended there. Next time that unit probes, it matches
+again **even though its MAC has changed** — which matters because current Flock
+cameras use randomised addresses, so the OUI tables never touch them. Six of the
+seven devices in the first real field capture we got (issue #25) had locally
+administered MACs.
+
+Rules it follows:
+
+- **Capped at "Class?"**, never Confirmed, exactly like a `signatures.json`
+  fingerprint. Picking the wrong row out of a list of seven is easy, so a
+  mis-confirmation has to cost a weak lead rather than a false camera.
+- **Un-confirming does not unlearn.** Detection must not depend on whether
+  somebody toggled a menu item twice. Forgetting is its own action:
+  **Reports → Forget Learned**, which shows how many are stored and deletes the
+  file.
+- A fingerprint of `00000000` is never stored — that is the "no fingerprint
+  captured" sentinel, and storing it would match every device that has none.
+- Plain text, one 8-hex value per line, `#` comments ignored. It is a line file
+  rather than JSON so that teaching the app one fingerprint is a single append
+  instead of a read-modify-rewrite of the whole file.
+- Bounded at 32 entries, the same cap as the JSON path.
+- Nothing is transmitted. There is no sync, no upload, and no account. If you
+  want a fingerprint to reach other people, send it to the issue tracker and it
+  goes through the same corroboration every other signature does.
+
 ## Schema
 
 All keys are optional; unknown keys are ignored. Every value is an array of strings.
@@ -26,6 +60,7 @@ All keys are optional; unknown keys are ignored. Every value is an array of stri
 ```json
 {
   "ouis":           ["aa:bb:cc"],
+  "macs":           ["aa:bb:cc:dd:ee:ff"],
   "ssid_confirmed": ["example-confirmed-ssid"],
   "ssid_likely":    ["example-likely-ssid"],
   "ie_fps":         ["deadbeef"]
@@ -35,9 +70,30 @@ All keys are optional; unknown keys are ignored. Every value is an array of stri
 | Key | Meaning | Scores at most | Cap |
 |-----|---------|----------------|-----|
 | `ouis` | MAC OUI prefix `aa:bb:cc` (case-insensitive) | **Possible** (OUI-only is weak) | 64 |
+| `macs` | A **whole** address `aa:bb:cc:dd:ee:ff` you pinned | **"Class?"** | 32 |
 | `ssid_confirmed` | SSID substring that all but names a Flock unit | **Confirmed** | 32 |
 | `ssid_likely` | Weaker SSID substring | **Likely** | 32 |
 | `ie_fps` | 8-hex probe **IE fingerprint** (see below) | **"Class?"** | 32 |
+
+### `macs`: for a randomised address that does not rotate
+
+**Randomised is not the same as rotating**, and conflating the two cost a lot of
+time. A locally administered MAC is invented by the device, so no manufacturer
+stands behind it and no OUI table can ever match it. But it does not follow that
+it changes: the first camera anyone checked twice kept the *identical* invented
+address across visits days apart.
+
+For that unit the address itself is the identifier, and `ouis` is the wrong tool
+— three bytes of a random address is a prefix shared with whatever else happens
+to randomise into it. `macs` compares all six.
+
+Capped at `Class?` like every other user signature. You can also pin one from the
+device without editing this file: open **Air Survey**, select the row, press
+**Flag MAC**. That writes to `learned.txt` (12 hex digits, no colons) and needs
+no restart of your editing workflow, only of the app.
+
+If the camera *does* rotate its address, this will not help and a fingerprint is
+what you want instead. Pin the address when you have seen the same one twice.
 
 > ### ⚠ `ssid_confirmed` needles are unanchored substrings
 >
@@ -161,10 +217,23 @@ behind it, this table is what that hit is resting on.
 
 ## Axon Enterprise (`AX` rows)
 
-Axon makes body-worn and in-car police equipment — Axon Body, Axon Fleet — which is
-**not fixed infrastructure**. It moves with a person or a vehicle, so an `AX` row
-says nothing about a camera on a pole, and the app labels it "Axon body/in-car kit"
-rather than anything with the word *camera* in it.
+> **Corrected 2026-08-29.** This section used to say an Axon hit could never be a
+> pole-mounted camera, because Axon made only body-worn and in-car equipment. That
+> is no longer true. In 2026 Axon launched **Outpost** and **Lightpost**, two
+> *fixed* ALPR cameras, and sold them into exactly the contracts cities were
+> cancelling with Flock — on the **same single OUI** as the body cameras. The app's
+> label changed from "Axon body/in-car kit" to **"Axon: body or fixed"** to match.
+> Nothing observable from a MAC separates the two.
+
+Axon makes body-worn and in-car police equipment (Axon Body, Axon Fleet) **and**
+fixed infrastructure ALPR (Outpost, Lightpost). One OUI covers all of it, so an
+`AX` row names the *vendor* and says nothing reliable about the form factor.
+
+**Axon Lightpost is worth knowing about separately**, because it is not Axon
+hardware underneath: it is built with **Ubicquia** and plugs into the NEMA
+photocell socket of an existing streetlight. That means the OUI you would actually
+see on the air is Ubicquia's, not Axon's — see [Vendor-exclusive
+tables](#vendor-exclusive-tables-competitor-hardware) below.
 
 Two identifiers, both taken straight from the issuing registry rather than from a
 list:
@@ -173,6 +242,8 @@ list:
 |---|---|---|
 | Wi-Fi / BLE MAC OUI | `00:25:df` | IEEE — *Axon Enterprise, Inc.* |
 | BLE company id | `0x034D` | Bluetooth SIG — *TASER International, Inc.* |
+
+Both re-verified against their registries on 2026-08-29 and both still correct.
 
 `0x034D` is filed under Axon's former name; they renamed from TASER International in
 2017 and the SIG record kept the original. That is the same pattern as Flock's
@@ -244,6 +315,184 @@ to record that a prefix was later doubted — importing it wholesale would silen
 the retractions above. Only the six prefixes named in the seed table were taken from
 it, and only into this unverified file. **Do not bulk-import that list.**
 
+## Vendor-exclusive tables (competitor hardware)
+
+Cities that drop Flock are not dropping ALPR — they are switching vendors. So as of
+v0.77 the app ships five more built-in OUI tables, one per competitor, and reports a
+**vendor** alongside the class.
+
+**Why this is a different kind of evidence from the Flock table.** `flock_ouis[]` is
+29 prefixes of which 21 are LITEON; only `b4:1e:52` belongs to Flock Safety. It is a
+list of *chip vendors Flock buys from*, so a bare match there describes millions of
+ordinary consumer devices — which is why bare-OUI scoring was removed after it
+reported a T-Mobile gateway. Every prefix below is registered to the **surveillance
+vendor itself**, so "this beacon came from a Ubicquia device" is a real statement
+where "this device contains a Liteon radio" is not.
+
+| Vendor | Prefixes | IEEE organisation | Why it should emit |
+|---|---|---|---|
+| Ubicquia | `94:7b:be` | *Ubicquia LLC* | UbiHub is a tri-band **Wi-Fi 6 access point**; the AP/AI variant adds dual 4K cameras and LPR. Base hardware for **Axon Lightpost**. |
+| Motorola Solutions | `00:04:7d`, `00:18:85`, `00:1f:92`, `4c:cc:34`, `10:74:6f`, `b8:e2:8c`, `9c:86:2b` | *Motorola Solutions Inc.* ×4, *MOTOROLA SOLUTIONS MALAYSIA SDN. BHD.* ×3 | The **L6Q** plate reader has built-in LTE, Wi-Fi *and* Bluetooth, commissioned from a phone via their "LPR Mobile Companion" app. |
+| Verkada | `e0:a7:00` | *Verkada Inc* | Cameras join Wi-Fi as **clients** (so they probe); the GW31E gateway is paired over Bluetooth. |
+| Genetec | `00:bf:15`, `0c:bf:15` | *Genetec Inc.* | AutoVu. **Weakest table here** — published SharpV/SharpZ3 specs list wired Ethernet only. |
+| Avigilon | `70:1a:d5` | *Avigilon Alta* | Motorola-owned; one of the brands Motorola sells fixed ALPR under. |
+
+Also recorded but **not yet consumed**: `0x04EC`, Motorola Solutions' Bluetooth SIG
+company id (verified — *not* `0x0008`, which is the legacy consumer-handset
+registration). Wiring it up needs a new BLE category in the companion sketch, not
+just a constant.
+
+### How these score, and why they are capped
+
+A vendor-exclusive hit scores **Possible**, on any frame type including a plain
+beacon, and is never promoted beyond that.
+
+- **Any frame type**, unlike the Flock table. A Flock camera is a station that does
+  not beacon, so a Flock OUI on a beacon is by construction not a camera. A Ubicquia
+  UbiHub *is* an access point — beaconing is its normal behaviour — so demanding
+  probe-request behaviour would reject the very frames the table exists to catch.
+- **Never above Possible**, because every one of these is registry-verified and
+  **none has been captured on the air**. Embedded products routinely expose the
+  Wi-Fi *module* vendor's OUI rather than the brand owner's — the reason most Flock
+  gear appears as Liteon — so these may match every unit of a product line, or none.
+
+### Vendor known, kind **not** known
+
+These all report the class `Gear`, not `ALPR`, and that is deliberate. One Motorola
+Solutions OUI covers plate readers, body cameras **and** APX/MOTOTRBO hand-held
+radios; a UbiHub AP6 is public Wi-Fi with no camera at all while an AP/AI carries the
+plate reader. Same prefix, nothing on the air to separate them. Naming the vendor is
+honest; naming the product would not be.
+
+### Vendors with no OUI at all
+
+So nobody researches this twice: **Rekor, Vigilant, PlateSmart, Altumint, LiveView,
+RedSpeed, Verra Mobility, Getac, Digital Ally and Panasonic i-PRO hold no IEEE
+registration.** They buy their hardware. Any list claiming an OUI for them is
+fabricating it. (SoundThinking does hold one, filed under its old name ShotSpotter —
+already in the acoustic table.)
+
+### Two look-alike traps, both live
+
+The same substring trap documented for "axon" applies to two of the vendors above,
+and here it is not hypothetical:
+
+- **`motorola`** also matches *Motorola Mobility LLC, a Lenovo Company*
+  (`50:16:f4`, `c4:a0:52`, `c8:58:95`, …) — consumer **phones**, a different company
+  from Motorola Solutions. Adding one would repeat the `48:27:ea` / `a4:cf:12`
+  failure on a far larger population.
+- **`genetec`** also matches *GENETEC Corporation* (`00:0a:b1`), an unrelated
+  Japanese company, and *Netgenetech* (`d8:c0:68`).
+
+`tools/check_oui_parity.py` now blocks all of these by prefix, and
+`test_flock_db.c` asserts each resolves to no vendor. Verify at the registry by
+**organisation name** before adding anything.
+
+## Unmanned aircraft (Remote ID)
+
+Drones are found by **ASTM F3411 Remote ID**, not by a MAC table, and the reason
+is worth stating plainly because it decides the whole design.
+
+Every US police-drone vendor was resolved against the IEEE registry on
+2026-09-07. Of the five a department realistically buys from today:
+
+| Vendor | IEEE block |
+|---|---|
+| Skydio | `38:1d:14` |
+| BRINC | **none** |
+| Aerodome | **none** |
+| Flock | `b4:1e:52` (the company block, not a drone block) |
+| Paladin | **none** |
+
+Three of the five hold nothing at all, so their radios transmit under whatever
+module vendor they bought -- the same shared-prefix problem that already forced
+Flock's Liteon prefixes down to "possible". **A prefix table cannot see the
+modern police fleet, and never will.**
+
+Remote ID can. It is a legal broadcast mandate (FAA 14 CFR Part 89), sent in the
+clear with no association or pairing, and vendor-independent by construction: the
+aircraft announces its own serial or registration, its own position, and -- in the
+System message -- **the operator's position**.
+
+FlipDeFlock decodes it over both transports the companion can hear:
+
+- **BLE**, service data under 16-bit UUID `0xFFFA` with application code `0x0D`.
+- **Wi-Fi beacons and probe responses**, vendor-specific IE with OUI `FA:0B:BC`
+  and vendor type `0x0D`. DJI in particular favours this form, so a BLE-only
+  receiver misses whole fleets while appearing to work.
+
+A Remote ID detection is scored **Confirmed**, and it is worth being precise
+about what that confirms: *a Remote ID broadcast was received*, so something is
+flying and announcing itself. It is **not** a claim that the aircraft is a police
+drone -- no signature could establish that, and the class says only "unmanned
+aircraft".
+
+Decoding happens on the Flipper (`helpers/open_drone_id.c`), never on the
+companion, which only recognises the transport and forwards raw bytes. That is
+deliberate: this is attacker-reachable radio input whose output is plotted on a
+map, and the Flipper side is the side with host tests.
+
+### Drone manufacturer OUIs (fallback only)
+
+24 prefixes, **MA-L holders only**: SZ DJI Technology, DJI Baiwang, Skydio,
+Parrot, Teal Drones, AeroVironment, Shield AI, Freefly, Zipline. A hit is scored
+like any other bare OUI (possible) and is **not** evidence of a police drone --
+DJI's blocks sit on far more hobbyist quadcopters than anything else.
+
+**Rejected**, and enforced by `tools/check_oui_parity.py`:
+
+- `f8:40:68` (DJI Ronin) and `20:1f:55` (DJI Osmo) -- genuinely DJI, but gimbals
+  and handheld cameras. Neither flies.
+- `4c:48:da`, `00:1f:64` -- "Beijing Autelan Technology", a networking company,
+  not Autel Robotics. The same substring-of-a-vendor-name trap as Axon Networks.
+- `ec:5b:cd`, `e0:b6:f5`, `34:b5:f3`, `ac:86:d1`, `24:a1:0d`, `b4:4d:43`,
+  `e8:b4:70`, `18:d7:93` -- Autel Robotics, Yuneec, Inspired Flight, Quantum
+  Systems, Cyon, UAV Navigation and Anduril all appear in community drone lists,
+  and every one of them holds only a /28 inside a shared IEEE Registration
+  Authority block. This table is three bytes wide, so matching them would flag
+  arbitrary unrelated hardware as an aircraft.
+
+## Body-worn cameras
+
+- **Axon** -- OUI `00:25:df` (their only IEEE block), plus the **`BWCDEVICE`**
+  ASCII tag in BLE service data. The tag is the stronger of the two: it is
+  MAC-independent, so it survives address randomisation, and it identifies a
+  body-worn camera *specifically*, where the OUI can only ever say "something Axon
+  made" -- and Axon now ships fixed ALPR poles on that same block.
+- **Utility, Inc ("BodyWorn")** -- OUIs `00:09:bc`, `00:16:ed`, plus adverts whose
+  name contains `BodyWorn Remote`.
+- **Digital Ally ("FirstVU")** -- OUI `00:23:bd`.
+
+**Rejected**: `fc:01:9e` (VIEVU -- a real body-camera block, but Axon bought the
+company in 2018 and discontinued the line) and `d4:2d:c5` (i-PRO -- a genuine
+surveillance vendor whose range runs from body cameras to fixed network cameras
+to industrial sensors, so the vendor is knowable and the product is not).
+
+## Coverage outside the United States
+
+Worth stating plainly, because the gap is structural rather than something a
+signature file can fill.
+
+**New Zealand is the clearest example.** Police reach there runs through **Auror**
+and **SaferCities vGRID/VIBE** — vGRID alone hosts thousands of cameras across
+hundreds of sites. But those are **software platforms that ingest existing retail and
+council CCTV**. There is no Auror device and no vGRID device. The hardware is
+ordinary Hikvision, Dahua, Uniview, Vivotek and Axis.
+
+So FlipDeFlock deliberately does **not** ship those OUIs. Adding them would flag
+every doorbell camera, every shop camera and quite possibly the user's own house as
+surveillance infrastructure — a false-positive rate that would make the whole app
+untrustworthy, to detect a network whose distinguishing feature is that it runs on
+cameras that were already there. Precision over recall applies to whole vendors, not
+just to individual prefixes.
+
+What *does* generalise: Jenoptik (`00:04:4c`, `48:e3:c3`) ships speed and ANPR
+enforcement hardware in AU/NZ/Europe, and Tattile, Nedap, Neology, Adaptive
+Recognition and Iteris all hold real registrations. None is in a built-in table —
+there is no evidence any of them emits Wi-Fi or BLE, and an unfireable table is worse
+than an absent one because it reads like coverage. They are listed here so a field
+capture that *does* hit one can be attributed.
+
 ## Capturing an IE fingerprint (`ie_fps`)
 
 Fielded Flock cameras increasingly phone home as ordinary Wi-Fi **probe requests**
@@ -263,6 +512,53 @@ From then on, a probe with the same IE fingerprint — even from a *different,
 randomized* MAC — is flagged **"Class?"** (a candidate device-class match). Only add
 a fingerprint you've corroborated against a real deployment; it's a device-*class*
 signature, not a unique device ID.
+
+### Some real cameras can never be caught by a fingerprint
+
+A fingerprint hashes the *shape* of a probe request, and nothing more. Two
+consequences, and the second one is a permanent limit rather than a bug:
+
+1. Any device running the same WiFi driver with the same scan configuration
+   produces a byte-identical hash. Several such patterns are refused outright —
+   see `flock_ie_fps_generic[]` in `helpers/flock_db.c` — because matching one
+   would flag a large share of the phones on any street.
+2. **Some genuine Flock hardware emits one of those commodity patterns.** This
+   is field-confirmed, not theoretical: a unit on `24:B2:B9`, which is in the
+   built-in Flock OUI table, was captured emitting `7c923b53` — the same skeleton
+   that had already smeared across unrelated vendors in a separate report.
+
+For those units the OUI is the only handle, and that is fine because they *have*
+a usable OUI. The gap that actually matters is a camera that is **both** on an
+unlisted or randomised address **and** emitting a commodity pattern. Nothing in
+this file can catch that one; pin its address with `macs` if it is stable, and
+otherwise it is Air Survey and your own eyes.
+
+Precision over recall makes this trade deliberately. A hash shared with every
+phone could not have identified the camera anyway.
+
+### A hash you added can be retracted out from under you, and that is on purpose
+
+The denylist is consulted **before every tier, including your own
+`signatures.json`**. If a hash you added later turns out to be a commodity
+pattern, a version bump makes it inert without you editing anything.
+
+This is not hypothetical, and the first case was this project's own bad advice.
+In September 2026 a maintainer told a reporter that `89c3debf` was "the device I
+think is the camera … matches nothing else", and he added it. His next drive
+found that hash on **ten devices spread over 7.9 km, at -17 to -96 dBm** — ten of
+the nineteen rows in the hit table he sent back were phones. A fixed camera is
+not in ten places at once. It is on the denylist now, so that card stopped
+flagging phones the moment he updated.
+
+Two things follow if you are curating your own file:
+
+- **A strong, close, chatty device next to a camera you can see is not proof.**
+  It is the *shape across a whole drive* that separates a camera from a phone.
+  Check whether the hash turns up far away and weak as well.
+- **Geography is the discriminator you have and the app does not.** The hash that
+  survived that same drive, `ba9fafa0`, did so because its four devices were
+  1.1 km to 6.1 km apart — they could not be one device rotating its address, and
+  could not be something riding in the car. It ships as a candidate now.
 
 > The placeholder values in `signatures.example.json` (`aa:bb:cc`, `deadbeef`, …)
 > are illustrative and won't match anything real — replace them with your own

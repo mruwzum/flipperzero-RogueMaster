@@ -1188,6 +1188,35 @@ static void process_frame(CanBusId bus, const CanFrame &frame) {
 
     // ── Continuous AP HW3/Legacy state parsers (read-only, always) ──────────
     if (frame.id == CAN_ID_SCCM_RSTALK) {
+        // Safety guard (#160): auto-disable Summon EU Unlock when the driver
+        // shifts into drive (0x229 gear lever full-down / D detent), so a
+        // leftover Summon override can't interfere with normal AP. Runs before
+        // the HW3/Legacy Continuous-AP gate below because Summon EU Unlock
+        // applies on HW3 + HW4, and that gate returns early on HW4. Edge-
+        // triggered by the summon_unlock==true guard: NVS is written only on the
+        // true→false flip, so repeated full-down 0x229 frames can't thrash NVS.
+        if (frame.dlc > SIG_GEAR_LEVER_POS_BYTE) {
+            uint8_t detent =
+                (frame.data[SIG_GEAR_LEVER_POS_BYTE] >> SIG_GEAR_LEVER_POS_SHIFT) &
+                SIG_GEAR_LEVER_POS_MASK;
+            if (detent == SIG_GEAR_LEVER_FULL_DOWN) {
+                FSDState saved;
+                bool disabled = false;
+                state_enter();
+                if (g_state.summon_unlock) {
+                    g_state.summon_unlock = false;
+                    saved = g_state;
+                    disabled = true;
+                }
+                state_exit();
+                if (disabled) {
+                    Serial.println("[SAFETY] Summon EU Unlock auto-disabled on drive-gear (0x229)");
+                    can_dump_log("[SAFETY] Summon EU Unlock auto-disabled on drive-gear (0x229)");
+                    prefs_save(&saved);
+                }
+            }
+        }
+
         FSDState s = state_snapshot();
         if (s.hw_version != TeslaHW_HW3 && s.hw_version != TeslaHW_Legacy) return;
         uint32_t now_ms = millis();
@@ -1633,6 +1662,7 @@ void loop() {
     serial_command_tick();
 
     // Drain all available CAN frames in one shot
+    uint32_t rx_missed_total = 0;
     for (uint8_t i = 0; i < CAN_ACTIVE_BUS_COUNT; i++) {
         if (!g_can_ok[i] || !g_can[i]) continue;
         CanBusId bus = bus_id_from_index(i);
@@ -1644,7 +1674,12 @@ void loop() {
         g_can[i]->serviceHealth();
         // Bus-off just fired → arm a black-box capture via the event-core (#124).
         if (g_can[i]->busOffEvent()) blackbox_busoff(now);
+        // Controller-level silent-decimation counter for capture-fidelity labels.
+        rx_missed_total += g_can[i]->rxMissedCount();
     }
+    // Feed the summed controller RX-missed total to the web stream so a capture
+    // can self-report how many frames the hardware dropped while it ran.
+    http_can_stream_note_rx_missed(rx_missed_total);
 
     // ── Periodic error counter refresh (~every 250 ms) ────────────────────────
     static uint32_t last_err_ms = 0;

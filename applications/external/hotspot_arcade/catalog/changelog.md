@@ -1,3 +1,36 @@
+## 1.10.0
+
+- Pick a smaller download. Releases now offer a .fap per board alongside the combined one.
+  If you know you have the official S2 dev board, the WROOM, or the C5, that build carries
+  only your board's firmware: about a third of the size, and a much quicker first launch.
+  The combined hotspot_arcade-all.fap still flashes any of the three. Thanks to Tyl3rA.
+- Install Firmware lists only the boards your download can actually flash, instead of
+  offering three and failing on the two that are not there.
+- If you keep your own content packs on the SD card, note the app's folder is named after
+  the .fap file. Moving to hotspot_arcade-all.fap means moving your packs from
+  apps_data/hotspot_arcade/ to apps_data/hotspot_arcade-all/.
+- The board firmware is unchanged, so there is no need to reflash your board.
+
+## 1.9.0
+
+- One score for the whole evening. Games pay on very different scales, so a ranking across
+  them never meant much. Now, at the end of any game, you gain a point for every player you
+  finished above: win a six-player round and that is five, win a one-on-one and that is one.
+  Each game keeps its own scoring exactly as it was. The phone lobby becomes a ranked board
+  between games and a badge keeps your running total on screen while you play. Thanks to
+  genkigenki for raising it.
+- The join page opens by itself again. The hotspot was handing out an address but never
+  telling phones where to look up names, so phones decided there was simply no internet and
+  never offered the portal. Typing 192.168.4.1 by hand always worked, which is why this
+  went unnoticed for so long.
+- Holds up with several phones. A busy session could run the board out of usable memory
+  until the page stopped loading and a second phone could not finish connecting, while
+  nearly 2 MB of the board's spare memory sat unused. It can use that memory now.
+- New Reset Scores control on the Flipper, and the Leaderboard now ranks on the evening's
+  total, shows the current game beside it, and fits one more player on screen.
+- Renaming yourself mid-game no longer wipes your score on the Flipper, a phone that drops
+  and comes back keeps it, and winning at Battleship finally scores at all.
+
 ## 1.8.0
 
 - Four new games, twenty in all. Fill the Blank: a prompt with a gap, everyone answers

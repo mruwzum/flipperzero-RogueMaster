@@ -1,0 +1,14 @@
+App(
+    appid="guitar_chords",
+    name="Guitar Chords",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="guitar_chords_app",
+    sources=["*.c"],
+    stack_size=4 * 1024,
+    fap_icon="icon.png",
+    fap_category="Media",
+    fap_author="KingBoa / NoodleNugget.com",
+    fap_weburl="https://github.com/NoodleNugget-com/flipper-guitar-chords",
+    fap_version="1.0",
+    fap_description="Browse guitar chord diagrams and practice chord progressions with a built-in metronome.",
+)

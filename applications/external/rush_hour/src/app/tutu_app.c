@@ -103,7 +103,7 @@ static void draw_game(Canvas* canvas, TutuApp* app) {
     canvas_draw_str(canvas, hx, 60, "hold: rst");
 }
 
-static void draw_win(Canvas* canvas, TutuApp* app) {
+static void draw_win(Canvas* canvas, const TutuApp* app) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str_aligned(canvas, 64, 20, AlignCenter, AlignCenter, "Solved!");
     char buf[32];
@@ -149,12 +149,12 @@ static void input_cb(InputEvent* event, void* ctx) {
 
 // ---- input handling per screen ----
 
-static void handle_game_input(TutuApp* app, InputEvent* e); // below
-static void handle_menu_input(TutuApp* app, InputEvent* e); // below
-static void handle_win_input(TutuApp* app, InputEvent* e); // below
-static void handle_credits_input(TutuApp* app, InputEvent* e); // below
+static void handle_game_input(TutuApp* app, const InputEvent* e); // below
+static void handle_menu_input(TutuApp* app, const InputEvent* e); // below
+static void handle_win_input(TutuApp* app, const InputEvent* e); // below
+static void handle_credits_input(TutuApp* app, const InputEvent* e); // below
 
-static void handle_game_input(TutuApp* app, InputEvent* e) {
+static void handle_game_input(TutuApp* app, const InputEvent* e) {
     // Back (short or long) returns to the level select, cursor on this level.
     if(e->key == InputKeyBack && (e->type == InputTypeShort || e->type == InputTypeLong)) {
         app->menu_cursor = app->level_index;
@@ -168,7 +168,7 @@ static void handle_game_input(TutuApp* app, InputEvent* e) {
     }
     if(e->type != InputTypeShort && e->type != InputTypeRepeat) return;
 
-    TutuPiece* sel = &app->board.pieces[app->selected];
+    const TutuPiece* sel = &app->board.pieces[app->selected];
     switch(e->key) {
     case InputKeyOk:
         if(e->type == InputTypeShort) // cycle on tap only, never on auto-repeat
@@ -200,6 +200,8 @@ static void handle_game_input(TutuApp* app, InputEvent* e) {
 
 static TutuApp* app_alloc(void) {
     TutuApp* app = malloc(sizeof(TutuApp));
+    furi_check(app);
+
     app->gui = furi_record_open(RECORD_GUI);
     app->view_port = view_port_alloc();
     app->input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
@@ -309,7 +311,7 @@ static void draw_menu(Canvas* canvas, TutuApp* app) {
     canvas_draw_str_aligned(canvas, 126, 63, AlignRight, AlignBottom, "hold=credits");
 }
 
-static void handle_menu_input(TutuApp* app, InputEvent* e) {
+static void handle_menu_input(TutuApp* app, const InputEvent* e) {
     if(e->type == InputTypeLong && e->key == InputKeyOk) {
         app->screen = ScreenCredits;
         return;
@@ -342,7 +344,7 @@ static void handle_menu_input(TutuApp* app, InputEvent* e) {
 
 // ---- win flow ----
 
-static void handle_win_input(TutuApp* app, InputEvent* e) {
+static void handle_win_input(TutuApp* app, const InputEvent* e) {
     if(e->type != InputTypeShort) return;
     if(e->key == InputKeyOk) {
         uint16_t next = app->level_index + 1;
@@ -371,6 +373,6 @@ static void draw_credits(Canvas* canvas, TutuApp* app) {
     canvas_draw_str_aligned(canvas, 64, 55, AlignCenter, AlignTop, "Back: menu");
 }
 
-static void handle_credits_input(TutuApp* app, InputEvent* e) {
+static void handle_credits_input(TutuApp* app, const InputEvent* e) {
     if(e->type == InputTypeShort && e->key == InputKeyBack) app->screen = ScreenMenu;
 }

@@ -2,7 +2,9 @@
 // Copyright (c) 2026 ReconGrunt
 #include "flock_detail_view.h"
 #include "../recon_app_i.h"
+#include "../helpers/open_drone_id.h"
 #include "../helpers/report_fmt.h"
+#include "../helpers/flock_ble.h" // FlockBleTell / flock_ble_tell_str
 #include "ui_widgets.h"
 
 #include <gui/elements.h>
@@ -53,6 +55,7 @@ typedef enum {
     FdClass,
     FdMethod,
     FdSeen,
+    FdProbeRate,
     FdMac,
     FdSsid,
     FdRssi, /**< the one row that also draws graphical bars */
@@ -63,6 +66,9 @@ typedef enum {
     FdSaved, /**< archived entries only */
     FdHidden, /**< hidden-SSID beaconing observed */
     FdIeFp, /**< a probe IE-fingerprint was captured */
+    FdUaType, /**< aircraft type, from a Remote ID Basic ID message */
+    FdOpLat, /**< OPERATOR latitude -- the pilot, not the aircraft */
+    FdOpLon,
     FdKindCount,
 } FdLineKind;
 
@@ -82,6 +88,7 @@ static const char* fd_src_phrase(char ftype) {
         return "beacon";
     case 'P':
     case 'F': // IE-fingerprint match -- still a probe request on the air
+    case 'S': // community probe-signature match -- likewise a probe request
         return "probe req";
     case 'R':
         return "probe resp";
@@ -96,9 +103,19 @@ static const char* fd_src_phrase(char ftype) {
 static bool fd_format(char* buf, size_t len, FdLineKind kind, const FlockEntry* e) {
     switch(kind) {
     case FdClass:
-        // What it IS. The confidence rung in the title bar says how sure we are,
-        // which is a different question.
-        snprintf(buf, len, "%s", flock_class_long_str((FlockDevClass)e->dev_class));
+        // What it IS, AND WHO MADE IT. The confidence rung in the title bar says
+        // how sure we are, which is a different question again.
+        //
+        // Vendor-aware on purpose: flock_class_long_str() answers the ALPR class
+        // with "Flock / ALPR camera", so before v0.77 this row named Flock
+        // Safety over an Axon or Ubicquia pole, and over MACs no table matched at
+        // all. This is the row an operator reads to decide what they are looking
+        // at, so it is the row that must not name the wrong company.
+        snprintf(
+            buf,
+            len,
+            "%s",
+            flock_device_long_str(flock_vendor_of(e->mac, e->ssid), (FlockDevClass)e->dev_class));
         return false;
     case FdMethod: {
         // WHY it is on the list. "Possible" states confidence but not what
@@ -107,6 +124,20 @@ static bool fd_format(char* buf, size_t len, FdLineKind kind, const FlockEntry* 
         // possible hit?"). Re-derived from stored evidence, never asserted by
         // the companion, so it cannot inherit an over-claim from older firmware.
         FlockMethod m = flock_method_of(e->mac, e->ssid, e->ftype, e->ie_fp);
+        // A BLE hit knows WHICH tell fired, and they are not equally strong: the
+        // 0x09C8 manufacturer id belongs to the battery vendor XUNTONG, while the
+        // Raven GATT service is Flock's own. Both reach Confirmed, so the rung
+        // alone cannot separate them -- name the evidence instead.
+        //
+        // ONLY refines the generic FlockMethodBle case. flock_method_of() tests
+        // the OUI tables BEFORE ftype, so a BLE hit on a Flock-OUI address
+        // already reads "Method: OUI" today; overriding that here would quietly
+        // change text this row has always shown. Rows restored from the card
+        // carry no tell and fall back to the same string as before.
+        if(m == FlockMethodBle && e->ble_tell != FlockBleTellNone) {
+            snprintf(buf, len, "Method: %s", flock_ble_tell_str((FlockBleTell)e->ble_tell));
+            return false;
+        }
         if(m == FlockMethodBle || m == FlockMethodUnknown) {
             // "BLE mfg ID + BLE advert" says the same thing twice, and an
             // "ESP probe rule" verdict is already about how it was seen -- both
@@ -120,6 +151,20 @@ static bool fd_format(char* buf, size_t len, FdLineKind kind, const FlockEntry* 
     case FdSeen:
         snprintf(buf, len, "Seen: %lu", (unsigned long)e->count);
         return false;
+    case FdProbeRate:
+        // WILDCARD PROBES IN THE COMPANION'S ~8 s WINDOW, at the closest
+        // sighting. This is the number that separates a pole from a handheld on
+        // a vendor prefix that sells both: mains-powered gear phones home every
+        // ~125 ms forever, a battery radio cannot, and a radio using WiFi at all
+        // is looking for a KNOWN network, which is a directed probe rather than
+        // a wildcard one.
+        //
+        // The companion measured this and put it on the wire from v0.88, and it
+        // was parsed and then thrown away -- never stored, never shown, never
+        // scored. Showing it is the whole point: it is evidence the operator can
+        // weigh, on the row where they are deciding whether to go and look.
+        snprintf(buf, len, "Probes/8s: %u", (unsigned)e->probe_rate);
+        return false;
     case FdMac: {
         char mac[18];
         fmt_mac(mac, sizeof(mac), e->mac);
@@ -132,7 +177,13 @@ static bool fd_format(char* buf, size_t len, FdLineKind kind, const FlockEntry* 
         snprintf(
             buf,
             len,
-            "SSID: %s",
+            // A probe REQUEST carries the network the device is LOOKING FOR,
+            // not its own name. Labelling both "SSID:" made a phone hunting for
+            // its home wifi read as a camera called "NETGEAR19", which is how a
+            // real drive's list got misread. Cameras send WILDCARD probes with no
+            // name at all, so a named probe target argues against this being one.
+            "%s: %s",
+            (e->ftype == 'P' && e->ssid[0]) ? "Seeking" : "SSID",
             e->ssid[0] ? e->ssid : (e->hidden ? "(withheld by AP)" : "(none seen)"));
         return false;
     case FdRssi:
@@ -182,6 +233,19 @@ static bool fd_format(char* buf, size_t len, FdLineKind kind, const FlockEntry* 
         // A confirmed unit's fp can be dropped into signatures.json ("ie_fps") to
         // catch its MAC-randomized twins.
         snprintf(buf, len, "IE-fp: %08lx", (unsigned long)e->ie_fp);
+        return false;
+    case FdUaType:
+        snprintf(buf, len, "Type: %s", odid_ua_type_str(e->ua_type));
+        return false;
+    case FdOpLat:
+        // THE OPERATOR, NOT THE AIRCRAFT, and the label has to say so on its own
+        // -- these rows sit directly under Lat/Lon, which are the drone's
+        // position, and the two are typically a kilometre apart. A row reading
+        // just "Lat:" twice would be read as a redraw glitch, and acted on.
+        snprintf(buf, len, "Pilot lat: %.5f", (double)e->op_lat);
+        return false;
+    case FdOpLon:
+        snprintf(buf, len, "Pilot lon: %.5f", (double)e->op_lon);
         return false;
     default:
         buf[0] = '\0';
@@ -233,6 +297,10 @@ static void flock_detail_view_draw_callback(Canvas* canvas, void* _model) {
     kinds[n++] = FdClass;
     kinds[n++] = FdMethod;
     kinds[n++] = FdSeen;
+    // Only when there is one. A BLE advert and a Marauder-scraped row have no
+    // probe rate at all, and a row of "Probes/8s: 0" would read as a measurement
+    // rather than as the absence of one.
+    if(e.probe_rate > 0) kinds[n++] = FdProbeRate;
     kinds[n++] = FdMac;
     kinds[n++] = FdSsid;
     kinds[n++] = FdRssi;
@@ -245,6 +313,17 @@ static void flock_detail_view_draw_callback(Canvas* canvas, void* _model) {
     }
     // Where a stored hit came from, in wall-clock terms. Only meaningful for an
     // archived entry: a live one's seen_epoch is "moments ago" by definition.
+    // Remote ID rows. Only an aircraft has them, and only once the relevant
+    // message type has actually arrived -- an aircraft cycles message types, so
+    // the operator position turns up seconds after the serial and these rows
+    // appear when it does.
+    if(e.dev_class == (uint8_t)FlockClassDrone) {
+        kinds[n++] = FdUaType;
+        if(!isnan(e.op_lat) && !isnan(e.op_lon)) {
+            kinds[n++] = FdOpLat;
+            kinds[n++] = FdOpLon;
+        }
+    }
     if(e.archived && e.seen_epoch) kinds[n++] = FdSaved;
     if(e.hidden) kinds[n++] = FdHidden;
     if(e.ie_fp != 0) kinds[n++] = FdIeFp;

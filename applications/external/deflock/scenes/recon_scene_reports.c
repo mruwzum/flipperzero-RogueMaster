@@ -2,12 +2,16 @@
 // Copyright (c) 2026 ReconGrunt
 #include "../recon_app_i.h"
 #include "../helpers/recon_report.h"
+#include "../helpers/sig_db.h"
 
 typedef enum {
     ReportItemSave,
+    ReportItemSaveAll,
+    ReportItemSaveRaw,
     ReportItemFalsePos,
     ReportItemClear,
     ReportItemClearSaved,
+    ReportItemForgetLearned,
 } ReportItem;
 
 static void recon_scene_reports_submenu_cb(void* context, uint32_t index) {
@@ -34,8 +38,22 @@ static void recon_scene_reports_build_menu(ReconApp* app) {
     submenu_reset(submenu);
     snprintf(app->text_store, RECON_TEXT_STORE, "Reports (%d marked)", marked);
     submenu_set_header(submenu, app->text_store);
+    // REDACTION IS THE DEFAULT POSITION, and it is expressed as separate menu
+    // items rather than a setting. A setting is decided once, months before the
+    // export that matters, and then forgotten; the label under the cursor is read
+    // every time. The one item that writes an unredacted file says so in its own
+    // name and sorts last, so it cannot be reached by muscle memory aimed at the
+    // first entry.
     submenu_add_item(
-        submenu, "Save Marked -> Report", ReportItemSave, recon_scene_reports_submenu_cb, app);
+        submenu, "Export Marked (Redacted)", ReportItemSave, recon_scene_reports_submenu_cb, app);
+    submenu_add_item(
+        submenu, "Export All (Redacted)", ReportItemSaveAll, recon_scene_reports_submenu_cb, app);
+    submenu_add_item(
+        submenu,
+        "Export All (RAW - private)",
+        ReportItemSaveRaw,
+        recon_scene_reports_submenu_cb,
+        app);
     // Redacted export for reporting a WRONG detection. Separate item rather than
     // an option on the one above, because the two files have opposite jobs: that
     // report is evidence about cameras and carries coordinates, this one is
@@ -49,6 +67,15 @@ static void recon_scene_reports_build_menu(ReconApp* app) {
     if(app->settings.save_hits || archived > 0) {
         submenu_add_item(
             submenu, "Clear Saved Hits", ReportItemClearSaved, recon_scene_reports_submenu_cb, app);
+    }
+    // Only when there is something to forget, and it says HOW MANY -- a learned
+    // signature is otherwise completely invisible: it lives in a file, changes
+    // scoring on a later drive, and nothing on screen would ever mention it.
+    size_t learned = sig_db_learned_count(app->storage);
+    if(learned > 0) {
+        snprintf(app->text_store, RECON_TEXT_STORE, "Forget Learned (%u)", (unsigned)learned);
+        submenu_add_item(
+            submenu, app->text_store, ReportItemForgetLearned, recon_scene_reports_submenu_cb, app);
     }
 }
 
@@ -75,16 +102,29 @@ bool recon_scene_reports_on_event(void* context, SceneManagerEvent event) {
     bool consumed = false;
 
     if(event.type == SceneManagerEventTypeCustom) {
-        if(event.event == ReportItemSave) {
+        if(event.event == ReportItemSave || event.event == ReportItemSaveAll ||
+           event.event == ReportItemSaveRaw) {
+            uint8_t flags = 0;
+            if(event.event != ReportItemSaveRaw) flags |= ReconExportRedact;
+            if(event.event != ReportItemSave) flags |= ReconExportAll;
             char path[128] = {0};
-            bool ok = recon_report_save_flock(app, path, sizeof(path));
+            bool ok = recon_report_save_flock(app, path, sizeof(path), flags);
             if(app->settings.sound) {
                 notification_message(app->notifications, ok ? &sequence_success : &sequence_error);
             }
+            // The popup names the posture as well. All three items write into the
+            // same folder and only the filename tells them apart, so the last
+            // thing on screen after a save should be WHICH kind was written --
+            // not a generic "Report Saved" that reads identically for all three.
+            const char* fail_text = (event.event == ReportItemSave) ? "Mark detections first" :
+                                                                      "No detections yet";
             recon_scene_reports_show_popup(
                 app,
-                ok ? "Report Saved" : "Nothing to Save",
-                ok ? "See apps_data/\nflipdeflock/reports" : "Mark detections first");
+                ok ? ((flags & ReconExportRedact) ? "Redacted Report" : "RAW Report") :
+                     "Nothing to Save",
+                ok ? ((flags & ReconExportRedact) ? "OUI only, no times,\nno other SSIDs" :
+                                                    "Full MACs + SSIDs.\nDo not share.") :
+                     fail_text);
             consumed = true;
         } else if(event.event == ReportItemFalsePos) {
             char path[128] = {0};
@@ -103,8 +143,25 @@ bool recon_scene_reports_on_event(void* context, SceneManagerEvent event) {
                 app->flock[i].marked = false;
             }
             furi_mutex_release(app->mutex);
+            // PERSIST IT. Clearing only the in-memory flags made the popup and
+            // the "(N marked)" header both say it worked while hits.csv still
+            // held every mark, so closing the app brought all of them back --
+            // verified on hardware: cleared, restarted, three marks returned.
+            // The hit menu already saves after a single mark toggle; clearing
+            // every mark at once is not the one that should skip it. A no-op
+            // when Save Hits is off, which is the same contract as everywhere
+            // else this is called.
+            recon_hits_save(app);
             recon_scene_reports_build_menu(app);
             recon_scene_reports_show_popup(app, "Marks Cleared", "");
+            consumed = true;
+        } else if(event.event == ReportItemForgetLearned) {
+            bool gone = sig_db_forget_learned(app->storage);
+            recon_scene_reports_build_menu(app);
+            recon_scene_reports_show_popup(
+                app,
+                gone ? "Learned Cleared" : "Nothing Learned",
+                gone ? "Takes effect on\nnext app start" : "");
             consumed = true;
         } else if(event.event == ReportItemClearSaved) {
             recon_hits_clear(app); // deletes hits.csv AND drops the restored entries

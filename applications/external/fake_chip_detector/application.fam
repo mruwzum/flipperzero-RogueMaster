@@ -8,6 +8,6 @@ App(
     fap_category="GPIO",
     fap_author="hleserg",
     fap_weburl="https://github.com/hleserg/flipper-fake-chip-detector",
-    fap_version="0.7",
+    fap_version="0.13",
     fap_description="Check whether an I2C sensor really is the chip it was sold as, before you solder it in.",
 )

@@ -1,10 +1,21 @@
 #include "zeromesh_roster.h"
 #include "zeromesh_gui.h"
+#include "zeromesh_protocol.h"
+#include "zeromesh_history.h"
+#include "zeromesh_map.h"
 
 #include <furi.h>
 #include <gui/canvas.h>
 #include <stdio.h>
 #include <string.h>
+
+static void fmt_coord(char* out, size_t cap, int32_t v) {
+    long whole = v / 10000000L;
+    long frac = v % 10000000L;
+    if(frac < 0) frac = -frac;
+    const char* sign = (v < 0 && whole == 0) ? "-" : "";
+    snprintf(out, cap, "%s%ld.%04ld", sign, whole, frac / 1000L);
+}
 
 static int calculate_wrapped_lines(Canvas* canvas, const char* text, int max_w) {
     if(!text || !text[0]) return 1;
@@ -138,9 +149,8 @@ void roster_add_node(ZeroMeshApp* app, uint32_t node_id, int8_t snr, int16_t rss
         } else {
             target_idx = oldest_idx;
         }
+        memset(&app->roster.nodes[target_idx], 0, sizeof(NodeEntry));
         app->roster.nodes[target_idx].node_id = node_id;
-        app->roster.nodes[target_idx].has_telemetry = false;
-        app->roster.nodes[target_idx].has_new_dm = false;
     }
 
     app->roster.nodes[target_idx].last_seen = furi_get_tick() / 1000;
@@ -164,6 +174,102 @@ void roster_update_telemetry(
             app->roster.nodes[i].battery_level = battery_level;
             app->roster.nodes[i].voltage = voltage;
             app->roster.nodes[i].has_telemetry = true;
+            break;
+        }
+    }
+
+    furi_mutex_release(app->lock);
+}
+
+void roster_update_name(
+    ZeroMeshApp* app,
+    uint32_t node_id,
+    const char* short_name,
+    const char* long_name) {
+    if(!app || node_id == 0) return;
+    if((!short_name || !short_name[0]) && (!long_name || !long_name[0])) return;
+
+    furi_mutex_acquire(app->lock, FuriWaitForever);
+
+    for(uint8_t i = 0; i < app->roster.count; i++) {
+        if(app->roster.nodes[i].node_id == node_id) {
+            if(short_name && short_name[0]) {
+                strncpy(
+                    app->roster.nodes[i].short_name,
+                    short_name,
+                    sizeof(app->roster.nodes[i].short_name) - 1);
+                app->roster.nodes[i].short_name[sizeof(app->roster.nodes[i].short_name) - 1] = 0;
+            }
+            if(long_name && long_name[0]) {
+                strncpy(
+                    app->roster.nodes[i].long_name,
+                    long_name,
+                    sizeof(app->roster.nodes[i].long_name) - 1);
+                app->roster.nodes[i].long_name[sizeof(app->roster.nodes[i].long_name) - 1] = 0;
+            }
+            app->roster.nodes[i].has_name = true;
+            break;
+        }
+    }
+
+    furi_mutex_release(app->lock);
+}
+
+void roster_update_sats(ZeroMeshApp* app, uint32_t node_id, uint8_t sats, bool fix) {
+    if(!app || node_id == 0) return;
+
+    furi_mutex_acquire(app->lock, FuriWaitForever);
+
+    for(uint8_t i = 0; i < app->roster.count; i++) {
+        if(app->roster.nodes[i].node_id == node_id) {
+            app->roster.nodes[i].sats = sats;
+            app->roster.nodes[i].sats_seen = true;
+            app->roster.nodes[i].has_fix = fix;
+            break;
+        }
+    }
+
+    furi_mutex_release(app->lock);
+}
+
+/* node_info proves a fix but always reports zero satellites. */
+void roster_update_fix(ZeroMeshApp* app, uint32_t node_id, bool fix) {
+    if(!app || node_id == 0) return;
+
+    furi_mutex_acquire(app->lock, FuriWaitForever);
+
+    for(uint8_t i = 0; i < app->roster.count; i++) {
+        if(app->roster.nodes[i].node_id == node_id) {
+            app->roster.nodes[i].has_fix = fix;
+            break;
+        }
+    }
+
+    furi_mutex_release(app->lock);
+}
+
+void roster_update_position(
+    ZeroMeshApp* app,
+    uint32_t node_id,
+    int32_t latitude_i,
+    int32_t longitude_i,
+    int32_t altitude,
+    uint32_t pos_time) {
+    if(!app || node_id == 0) return;
+
+    /* A node with GPS but no fix reports 0/0. That is a real coordinate in the
+       Atlantic, so treat it as "no fix" rather than plotting it. */
+    if(latitude_i == 0 && longitude_i == 0) return;
+
+    furi_mutex_acquire(app->lock, FuriWaitForever);
+
+    for(uint8_t i = 0; i < app->roster.count; i++) {
+        if(app->roster.nodes[i].node_id == node_id) {
+            app->roster.nodes[i].latitude_i = latitude_i;
+            app->roster.nodes[i].longitude_i = longitude_i;
+            app->roster.nodes[i].altitude = altitude;
+            app->roster.nodes[i].pos_time = pos_time;
+            app->roster.nodes[i].has_position = true;
             break;
         }
     }
@@ -292,13 +398,24 @@ void render_roster(Canvas* canvas, ZeroMeshApp* app) {
             uint32_t now = furi_get_tick() / 1000;
             uint32_t diff = now - app->roster.nodes[idx].last_seen;
             const char* alert = app->roster.nodes[idx].has_new_dm ? "(!)" : " ";
-            snprintf(
-                line_buf,
-                sizeof(line_buf),
-                "%s %08lX %lus ago",
-                alert,
-                (unsigned long)app->roster.nodes[idx].node_id,
-                (unsigned long)diff);
+            const NodeEntry* ne = &app->roster.nodes[idx];
+            if(ne->has_name && (ne->long_name[0] || ne->short_name[0])) {
+                snprintf(
+                    line_buf,
+                    sizeof(line_buf),
+                    "%s %s %lus",
+                    alert,
+                    ne->long_name[0] ? ne->long_name : ne->short_name,
+                    (unsigned long)diff);
+            } else {
+                snprintf(
+                    line_buf,
+                    sizeof(line_buf),
+                    "%s %08lX %lus ago",
+                    alert,
+                    (unsigned long)ne->node_id,
+                    (unsigned long)diff);
+            }
             canvas_draw_str(canvas, 4, y, line_buf);
             y += 12;
         }
@@ -310,7 +427,12 @@ void render_roster(Canvas* canvas, ZeroMeshApp* app) {
     }
 
     if(app->roster.state == RosterStateChat) {
-        snprintf(title_buf, sizeof(title_buf), "Chat: %08lX", (unsigned long)selected->node_id);
+        if(selected->has_name && selected->short_name[0]) {
+            snprintf(title_buf, sizeof(title_buf), "Chat: %s", selected->short_name);
+        } else {
+            snprintf(
+                title_buf, sizeof(title_buf), "Chat: %08lX", (unsigned long)selected->node_id);
+        }
         draw_header(canvas, app, title_buf);
         canvas_set_color(canvas, ColorBlack);
 
@@ -399,7 +521,12 @@ void render_roster(Canvas* canvas, ZeroMeshApp* app) {
     }
 
     if(app->roster.state == RosterStateDetails) {
-        snprintf(title_buf, sizeof(title_buf), "Node: %08lX", (unsigned long)selected->node_id);
+        if(selected->has_name && selected->long_name[0]) {
+            snprintf(title_buf, sizeof(title_buf), "%s", selected->long_name);
+        } else {
+            snprintf(
+                title_buf, sizeof(title_buf), "Node: %08lX", (unsigned long)selected->node_id);
+        }
         draw_header(canvas, app, title_buf);
 
         canvas_set_color(canvas, ColorBlack);
@@ -417,15 +544,38 @@ void render_roster(Canvas* canvas, ZeroMeshApp* app) {
         canvas_draw_str(canvas, 4, 36, buf);
 
         if(selected->has_telemetry) {
-            snprintf(buf, sizeof(buf), "Battery: %u%%", selected->battery_level);
-            canvas_draw_str(canvas, 4, 48, buf);
-
             int v_int = (int)selected->voltage;
             int v_dec = (int)(selected->voltage * 100) % 100;
-            snprintf(buf, sizeof(buf), "Voltage: %d.%02dV", v_int, v_dec);
-            canvas_draw_str(canvas, 4, 60, buf);
+            if(selected->sats_seen) {
+                snprintf(
+                    buf,
+                    sizeof(buf),
+                    "Batt %u%% %d.%02dV %u sat",
+                    selected->battery_level,
+                    v_int,
+                    v_dec,
+                    selected->sats);
+            } else {
+                snprintf(
+                    buf, sizeof(buf), "Batt %u%%  %d.%02dV", selected->battery_level, v_int, v_dec);
+            }
+            canvas_draw_str(canvas, 4, 48, buf);
+        } else if(selected->sats_seen) {
+            snprintf(buf, sizeof(buf), "Satellites: %u", selected->sats);
+            canvas_draw_str(canvas, 4, 48, buf);
         } else {
             canvas_draw_str(canvas, 4, 48, "No telemetry data yet");
+        }
+
+        if(selected->has_position) {
+            char la[16], lo[16];
+            fmt_coord(la, sizeof(la), selected->latitude_i);
+            fmt_coord(lo, sizeof(lo), selected->longitude_i);
+            snprintf(buf, sizeof(buf), "%s,%s", la, lo);
+            canvas_draw_str(canvas, 4, 60, buf);
+            canvas_draw_str(canvas, 96, 60, "Up: Map");
+        } else if(selected->sats_seen) {
+            canvas_draw_str(canvas, 4, 60, "No GPS fix yet");
         }
         return;
     }
@@ -440,23 +590,23 @@ void input_roster(InputEvent* e, ZeroMeshApp* app) {
                 app->roster.selected_idx--;
             else
                 app->roster.selected_idx = app->roster.count - 1;
-            view_port_update(app->vp);
+            app->need_render = true;
         } else if(
             e->key == InputKeyDown && (e->type == InputTypeShort || e->type == InputTypeRepeat)) {
             if(app->roster.selected_idx < app->roster.count - 1)
                 app->roster.selected_idx++;
             else
                 app->roster.selected_idx = 0;
-            view_port_update(app->vp);
+            app->need_render = true;
         } else if(e->key == InputKeyOk) {
             if(e->type == InputTypeShort) {
                 app->roster.nodes[app->roster.selected_idx].has_new_dm = false;
                 app->roster.state = RosterStateChat;
                 app->roster.chat_scroll = 0;
-                view_port_update(app->vp);
+                app->need_render = true;
             } else if(e->type == InputTypeLong) {
                 app->roster.state = RosterStateDetails;
-                view_port_update(app->vp);
+                app->need_render = true;
             }
         }
         return;
@@ -465,24 +615,40 @@ void input_roster(InputEvent* e, ZeroMeshApp* app) {
     if(app->roster.state == RosterStateChat) {
         if(e->key == InputKeyUp && (e->type == InputTypeShort || e->type == InputTypeRepeat)) {
             app->roster.chat_scroll++;
-            view_port_update(app->vp);
+            app->need_render = true;
         } else if(
             e->key == InputKeyDown && (e->type == InputTypeShort || e->type == InputTypeRepeat)) {
             if(app->roster.chat_scroll > 0) app->roster.chat_scroll--;
-            view_port_update(app->vp);
+            app->need_render = true;
         } else if(e->key == InputKeyOk && e->type == InputTypeShort) {
             app->show_keyboard = true;
         } else if(e->key == InputKeyBack && e->type == InputTypeShort) {
             app->roster.state = RosterStateList;
-            view_port_update(app->vp);
+            app->need_render = true;
         }
         return;
     }
 
     if(app->roster.state == RosterStateDetails) {
-        if(e->key == InputKeyBack && e->type == InputTypeShort) {
+        NodeEntry* sel = &app->roster.nodes[app->roster.selected_idx];
+        if(e->key == InputKeyUp && e->type == InputTypeShort && sel->has_position) {
+            map_focus_node(app, sel->node_id);
             app->roster.state = RosterStateList;
-            view_port_update(app->vp);
+            app->ui_mode = PAGE_MAP;
+            app->need_render = true;
+        } else if(e->key == InputKeyBack && e->type == InputTypeShort) {
+            app->roster.state = RosterStateList;
+            app->need_render = true;
+        } else if(e->key == InputKeyOk && e->type == InputTypeShort) {
+            app->pending_node = sel->node_id;
+            app->pending_action = PendingPosReq;
+            set_status(app, "Position requested");
+            app->need_render = true;
+        } else if(e->key == InputKeyOk && e->type == InputTypeLong) {
+            app->pending_node = sel->node_id;
+            app->pending_action = PendingInfoReq;
+            set_status(app, "Info requested");
+            app->need_render = true;
         }
         return;
     }
