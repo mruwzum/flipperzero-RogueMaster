@@ -34,6 +34,11 @@ class StorageErrorCode(enum.Enum):
     NOT_READY = "filesystem not ready"
     EXIST = "file/dir already exist"
     NOT_EXIST = "file/dir not exist"
+    # The firmware answers "file/dir doesn't exist", not "file/dir not exist". Without
+    # this variant from_value() falls through to UNKNOWN, so exist_dir() raises instead
+    # of returning False and mkpath() aborts before uploading anything: every USB
+    # install fails. Checked against a real device on 23 Sep 2026.
+    NOT_EXIST_ALT = "file/dir doesn't exist"
     INVALID_PARAMETER = "invalid parameter"
     DENIED = "access denied"
     INVALID_NAME = "invalid name/path"
@@ -350,6 +355,7 @@ class FlipperStorage:
             error_code = self.get_error(response)
             if error_code in (
                 StorageErrorCode.NOT_EXIST,
+                StorageErrorCode.NOT_EXIST_ALT,
                 StorageErrorCode.INVALID_NAME,
             ):
                 return False
