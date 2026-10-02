@@ -48,6 +48,14 @@ static const char kPoiTagged[] = "POI tagged: ";
  * fixtures/startup_info.bin. info has no builder (folding it into the codec is T7.2).
  */
 static const char kCmdInfo[] = "info\n";
+static const char kDiag[] = "Diag: ";
+static const char kBusy[] = "Busy: ";
+static const char kSess[] = "Sess: ";
+static const char kRadio[] = "Radio: ";
+static const char kQual[] = "Qual: ";
+static const char kUp[] = "Up: ";
+static const char kRank[] = "Rank: ";
+static const char kCfg[] = "Cfg: ";
 
 typedef struct {
     const char* p;
@@ -361,6 +369,467 @@ static size_t marauder_poi(char* buf, size_t cap) {
     return sr_cmd_write(buf, cap, kCmdPoi);
 }
 
+/*
+ * Small scanners for the two fixed-shape diagnostic lines. ADR-010: they read only
+ * inside [line, line+len) and never call a NUL-scanning string function.
+ * Every one advances *p only on success, so a failed field leaves the cursor where the
+ * caller can still reject the whole line.
+ */
+static bool scan_lit(const char* line, size_t len, size_t* p, const char* lit, size_t n) {
+    if(*p > len || len - *p < n || memcmp(line + *p, lit, n) != 0) {
+        return false;
+    }
+    *p += n;
+    return true;
+}
+
+static bool scan_u32(const char* line, size_t len, size_t* p, uint32_t* out) {
+    uint64_t v = 0;
+    unsigned digits = 0;
+
+    while(*p < len && line[*p] >= '0' && line[*p] <= '9') {
+        if(digits >= 10U) {
+            return false;
+        }
+        v = v * 10U + (uint64_t)(line[*p] - '0');
+        (*p)++;
+        digits++;
+    }
+    if(digits == 0U || v > 0xFFFFFFFFu) {
+        return false;
+    }
+    *out = (uint32_t)v;
+    return true;
+}
+
+/* Exactly two lower-case hex digits, matching the firmware's %02x. Two, not "one or
+ * two": a bare %x would print 0x0f as "f" and silently drop the leading gate. */
+static bool scan_hex2(const char* line, size_t len, size_t* p, uint8_t* out) {
+    unsigned v = 0;
+    unsigned i;
+
+    if(*p > len || len - *p < 2U) {
+        return false;
+    }
+    for(i = 0; i < 2U; i++) {
+        char c = line[*p + i];
+        unsigned d;
+
+        if(c >= '0' && c <= '9') {
+            d = (unsigned)(c - '0');
+        } else if(c >= 'a' && c <= 'f') {
+            d = (unsigned)(c - 'a') + 10U;
+        } else {
+            return false;
+        }
+        v = (v << 4) | d;
+    }
+    *p += 2U;
+    *out = (uint8_t)v;
+    return true;
+}
+
+/*
+ * "Diag: st=<dec> seal=<2 hex> hb=<d>/<d>/<d>/<d>/<d>/<d>", nothing after. The fifth
+ * #info line. Strict on every field: a half-read diagnostic is worse than none, because
+ * this line exists precisely for the case where nothing else is answering.
+ */
+static bool diag_parse(const char* line, size_t len, SrFirmwareInfo* out) {
+    size_t p = sizeof(kDiag) - 1U;
+    uint32_t st = 0;
+    uint8_t seal = 0;
+    uint32_t hb[SR_DIAG_HB_COUNT];
+    unsigned i;
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kDiag, p) != 0) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, "st=", 3U)) {
+        return false;
+    }
+    if(!scan_u32(line, len, &p, &st) || st > 255U) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " seal=", 6U) || !scan_hex2(line, len, &p, &seal)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " hb=", 4U)) {
+        return false;
+    }
+    for(i = 0; i < (unsigned)SR_DIAG_HB_COUNT; i++) {
+        if(i > 0U && !scan_lit(line, len, &p, "/", 1U)) {
+            return false;
+        }
+        if(!scan_u32(line, len, &p, &hb[i])) {
+            return false;
+        }
+    }
+    if(p != len) {
+        return false;
+    }
+    out->diag_seen = true;
+    out->diag_state = (uint8_t)st;
+    out->diag_seal = seal;
+    for(i = 0; i < (unsigned)SR_DIAG_HB_COUNT; i++) {
+        out->diag_hb[i] = hb[i];
+    }
+    return true;
+}
+
+/*
+ * "Busy: st=<dec> seal=<2 hex>", nothing after. The board echoed the command — so the
+ * L2 indicator cleared — and is refusing to act on it. Same strictness: a malformed
+ * refusal must fall through to the Raw ring rather than clear cmd_pending on a
+ * half-read value.
+ */
+static bool busy_parse(const char* line, size_t len, SrBusyInfo* out) {
+    size_t p = sizeof(kBusy) - 1U;
+    uint32_t st = 0;
+    uint8_t seal = 0;
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kBusy, p) != 0) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, "st=", 3U)) {
+        return false;
+    }
+    if(!scan_u32(line, len, &p, &st) || st > 255U) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " seal=", 6U) || !scan_hex2(line, len, &p, &seal)) {
+        return false;
+    }
+    if(p != len) {
+        return false;
+    }
+    out->state = (uint8_t)st;
+    out->seal = seal;
+    return true;
+}
+
+/*
+ * "Sess: ap=<u32> ble=<u32> ms=<u32> ih=<u32> ihmin=<u32> ps=<u32> psmin=<u32>",
+ * nothing after. Last line of the #info reply (n6-fap-sess-consume.md §2).
+ * Strict on every field: a half-read session face is worse than none, because
+ * seeding from it would write half a number into ap_wifi / ap_ble / started_tick_ms.
+ * All seven fields are consumed so p != len holds; only ap/ble/ms are stored.
+ */
+static bool sess_parse(const char* line, size_t len, SrSessInfo* out) {
+    size_t p = sizeof(kSess) - 1U;
+    uint32_t ap = 0;
+    uint32_t ble = 0;
+    uint32_t ms = 0;
+    uint32_t ih = 0;
+    uint32_t ihmin = 0;
+    uint32_t ps = 0;
+    uint32_t psmin = 0;
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kSess, p) != 0) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, "ap=", 3U) || !scan_u32(line, len, &p, &ap)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " ble=", 5U) || !scan_u32(line, len, &p, &ble)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " ms=", 4U) || !scan_u32(line, len, &p, &ms)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " ih=", 4U) || !scan_u32(line, len, &p, &ih)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " ihmin=", 7U) || !scan_u32(line, len, &p, &ihmin)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " ps=", 4U) || !scan_u32(line, len, &p, &ps)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " psmin=", 7U) || !scan_u32(line, len, &p, &psmin)) {
+        return false;
+    }
+    if(p != len) {
+        return false;
+    }
+    out->ap = ap;
+    out->ble = ble;
+    out->ms = ms;
+    (void)ih;
+    (void)ihmin;
+    (void)ps;
+    (void)psmin;
+    return true;
+}
+
+/*
+ * "Qual: gga=<u32> ggafix=<u32> drop=<u32> net=<u32> sd=<u> sats=<u> topd=<u>",
+ * nothing after. Last line of the #info reply (F2). Strict on every field:
+ * a half-read quality face would feed zeros into the health verdict and look
+ * like a real measurement. sd/sats/topd are stored as uint8; a value over 255
+ * is rejected rather than truncated.
+ */
+static bool qual_parse(const char* line, size_t len, SrQualInfo* out) {
+    size_t p = sizeof(kQual) - 1U;
+    uint32_t gga = 0;
+    uint32_t ggafix = 0;
+    uint32_t drop = 0;
+    uint32_t net = 0;
+    uint32_t sd = 0;
+    uint32_t sats = 0;
+    uint32_t topd = 0;
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kQual, p) != 0) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, "gga=", 4U) || !scan_u32(line, len, &p, &gga)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " ggafix=", 8U) || !scan_u32(line, len, &p, &ggafix)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " drop=", 6U) || !scan_u32(line, len, &p, &drop)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " net=", 5U) || !scan_u32(line, len, &p, &net)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " sd=", 4U) || !scan_u32(line, len, &p, &sd) || sd > 255U) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " sats=", 6U) || !scan_u32(line, len, &p, &sats) || sats > 255U) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " topd=", 6U) || !scan_u32(line, len, &p, &topd) || topd > 255U) {
+        return false;
+    }
+    if(p != len) {
+        return false;
+    }
+    out->gga = gga;
+    out->ggafix = ggafix;
+    out->drop = drop;
+    out->net = net;
+    out->sd = (uint8_t)sd;
+    out->sats = (uint8_t)sats;
+    out->topd = (uint8_t)topd;
+    return true;
+}
+
+/* Exactly one ASCII '0' or '1'. scan_u32 would accept "01" / "2". */
+static bool scan_bit01(const char* line, size_t len, size_t* p, uint8_t* out) {
+    char c;
+
+    if(*p >= len) {
+        return false;
+    }
+    c = line[*p];
+    if(c != '0' && c != '1') {
+        return false;
+    }
+    *out = (uint8_t)(c - '0');
+    (*p)++;
+    return true;
+}
+
+/*
+ * "Radio: wifi=<0|1> ble=<0|1>", nothing after. Permission bits, not counts
+ * (ADR-24 / T6.5). A malformed line must fall through to Unknown rather than
+ * look like wifi-only / BLE-off. Absence of the line is the model's job
+ * (radio_rev == 0); this parser only accepts a complete pair.
+ */
+static bool radio_parse(const char* line, size_t len, SrRadioInfo* out) {
+    size_t p = sizeof(kRadio) - 1U;
+    uint8_t wifi = 0;
+    uint8_t ble = 0;
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kRadio, p) != 0) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, "wifi=", 5U) || !scan_bit01(line, len, &p, &wifi)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " ble=", 5U) || !scan_bit01(line, len, &p, &ble)) {
+        return false;
+    }
+    if(p != len) {
+        return false;
+    }
+    out->wifi = wifi;
+    out->ble = ble;
+    return true;
+}
+
+static bool scan_up_trans(const char* line, size_t len, size_t* p, char* out, size_t cap) {
+    size_t n = 0;
+
+    if(out == NULL || cap < 2U || *p >= len) {
+        return false;
+    }
+    if(line[*p] == '-' && ((*p + 1U) == len || line[*p + 1U] == ' ')) {
+        out[0] = '-';
+        out[1] = '\0';
+        (*p)++;
+        return true;
+    }
+    while(*p < len && line[*p] != ' ') {
+        char c = line[*p];
+        if(!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+             c == '.' || c == '_' || c == '-')) {
+            return false;
+        }
+        if(n + 1U >= cap) {
+            return false;
+        }
+        out[n++] = c;
+        (*p)++;
+    }
+    if(n == 0U) {
+        return false;
+    }
+    out[n] = '\0';
+    return true;
+}
+
+static bool scan_up_reason(const char* line, size_t len, size_t* p, char* out, size_t cap) {
+    size_t n = 0;
+
+    if(out == NULL || cap < 2U || *p >= len) {
+        return false;
+    }
+    if(line[*p] == '-' && (*p + 1U) == len) {
+        out[0] = '-';
+        out[1] = '\0';
+        (*p)++;
+        return true;
+    }
+    while(*p < len) {
+        char c = line[*p];
+        if(!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) {
+            return false;
+        }
+        if(n + 1U >= cap) {
+            return false;
+        }
+        out[n++] = c;
+        (*p)++;
+    }
+    if(n == 0U) {
+        return false;
+    }
+    out[n] = '\0';
+    return true;
+}
+
+/*
+ * "Up: up_q=<u32> up_last_trans=<id|-> up_disc_gps=<u32> up_reason=<token|->",
+ * nothing after. H2. Strict on every field.
+ */
+static bool up_parse(const char* line, size_t len, SrUpInfo* out) {
+    size_t p = sizeof(kUp) - 1U;
+    uint32_t q = 0;
+    uint32_t disc = 0;
+    char last[SR_UP_TRANS_MAX + 1];
+    char reason[SR_UP_REASON_MAX + 1];
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kUp, p) != 0) {
+        return false;
+    }
+    last[0] = '\0';
+    reason[0] = '\0';
+    if(!scan_lit(line, len, &p, "up_q=", 5U) || !scan_u32(line, len, &p, &q)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " up_last_trans=", 15U) ||
+       !scan_up_trans(line, len, &p, last, sizeof last)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " up_disc_gps=", 13U) || !scan_u32(line, len, &p, &disc)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " up_reason=", 11U) ||
+       !scan_up_reason(line, len, &p, reason, sizeof reason)) {
+        return false;
+    }
+    if(p != len) {
+        return false;
+    }
+    out->q = q;
+    out->disc_gps = disc;
+    {
+        size_t ln = 0;
+        size_t rn = 0;
+        while(last[ln] != '\0') {
+            ln++;
+        }
+        while(reason[rn] != '\0') {
+            rn++;
+        }
+        copy_cap(out->last_trans, sizeof out->last_trans, last, ln);
+        copy_cap(out->reason, sizeof out->reason, reason, rn);
+    }
+    return true;
+}
+
+/*
+ * "Rank: rank=<u32> month=<u32> wifi_gps=<u32>", nothing after.
+ * Account totals. A short or negative field falls through to Unknown.
+ */
+static bool rank_parse(const char* line, size_t len, SrRankInfo* out) {
+    size_t p = sizeof(kRank) - 1U;
+    uint32_t rank = 0;
+    uint32_t month = 0;
+    uint32_t wifi = 0;
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kRank, p) != 0) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, "rank=", 5U) || !scan_u32(line, len, &p, &rank)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " month=", 7U) || !scan_u32(line, len, &p, &month)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " wifi_gps=", 10U) || !scan_u32(line, len, &p, &wifi)) {
+        return false;
+    }
+    if(p != len) {
+        return false;
+    }
+    out->rank = rank;
+    out->month = month;
+    out->wifi_gps = wifi;
+    return true;
+}
+
+/*
+ * "Cfg: key=<0|1> home=<0|1> ssid=<rest of line>".
+ * key and home are exactly one character 0 or 1. ssid is the last field and
+ * keeps spaces; "-" means none. Longer than 32 bytes is truncated into ssid[33].
+ * A short or illegal key/home falls through to Unknown.
+ */
+static bool cfg_parse(const char* line, size_t len, SrCfgInfo* out) {
+    size_t p = sizeof(kCfg) - 1U;
+    uint8_t key = 0;
+    uint8_t home = 0;
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kCfg, p) != 0) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, "key=", 4U) || !scan_bit01(line, len, &p, &key)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " home=", 6U) || !scan_bit01(line, len, &p, &home)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " ssid=", 6U) || p >= len) {
+        return false;
+    }
+    out->key = key;
+    out->home = home;
+    copy_cap(out->ssid, sizeof(out->ssid), line + p, len - p);
+    return true;
+}
+
 static bool probe_n(const char* line, size_t len, SrFirmwareInfo* out) {
     static const char kFw[] = "Firmware: ";
     static const char kVer[] = "Version: ";
@@ -375,6 +844,15 @@ static bool probe_n(const char* line, size_t len, SrFirmwareInfo* out) {
     plen = sizeof(kFw) - 1U;
     if(len >= plen && memcmp(line, kFw, plen) == 0) {
         size_t fn = 0;
+
+        /* Firmware: starts a new #info identity block. Drop the previous
+         * block's Diag: so a later firmware_rev bump cannot adopt with a
+         * stale diag_state (C1/C2). Version:/Hardware:/ESP-IDF: must not
+         * do this — Diag: follows them in the same reply. */
+        out->diag_seen = false;
+        out->diag_state = 0;
+        out->diag_seal = 0;
+        memset(out->diag_hb, 0, sizeof(out->diag_hb));
 
         copy_cap(out->firmware, sizeof(out->firmware), line + plen, len - plen);
         while(out->firmware[fn] != '\0') {
@@ -398,6 +876,9 @@ static bool probe_n(const char* line, size_t len, SrFirmwareInfo* out) {
     plen = sizeof(kIdf) - 1U;
     if(len >= plen && memcmp(line, kIdf, plen) == 0) {
         copy_cap(out->esp_idf, sizeof(out->esp_idf), line + plen, len - plen);
+        return true;
+    }
+    if(diag_parse(line, len, out)) {
         return true;
     }
     return false;
@@ -616,6 +1097,41 @@ static SrParseResult marauder_feed(SrParser* parser, const char* line, size_t le
         out->kind = SrEventScanStopped;
         out->u.stop = SrStopGpsUpdates;
         parser->in_session = false;
+        return SrParseOk;
+    }
+
+    if(busy_parse(line, len, &out->u.busy)) {
+        out->kind = SrEventBusy;
+        return SrParseOk;
+    }
+
+    if(sess_parse(line, len, &out->u.sess)) {
+        out->kind = SrEventSess;
+        return SrParseOk;
+    }
+
+    if(radio_parse(line, len, &out->u.radio)) {
+        out->kind = SrEventRadio;
+        return SrParseOk;
+    }
+
+    if(qual_parse(line, len, &out->u.qual)) {
+        out->kind = SrEventQual;
+        return SrParseOk;
+    }
+
+    if(up_parse(line, len, &out->u.up)) {
+        out->kind = SrEventUp;
+        return SrParseOk;
+    }
+
+    if(rank_parse(line, len, &out->u.rank)) {
+        out->kind = SrEventRank;
+        return SrParseOk;
+    }
+
+    if(cfg_parse(line, len, &out->u.cfg)) {
+        out->kind = SrEventCfg;
         return SrParseOk;
     }
 

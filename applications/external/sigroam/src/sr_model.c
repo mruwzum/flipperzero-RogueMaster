@@ -1,4 +1,5 @@
 #include "sr_model.h"
+#include "sr_dialect.h"
 
 #include <string.h>
 
@@ -105,6 +106,9 @@ void sr_model_reset_session(SrModel* m, bool also_reset_bloom) {
 
     m->ap_wifi = 0;
     m->ap_ble = 0;
+    m->ap_24 = 0;
+    m->ap_5 = 0;
+    m->band_partial = false;
     m->gps_blocks = 0;
     m->unknown_lines = 0;
     m->malformed_lines = 0;
@@ -112,6 +116,7 @@ void sr_model_reset_session(SrModel* m, bool also_reset_bloom) {
     m->unique_est = 0;
     m->illegal_trans = 0;
     m->started_tick_ms = 0;
+    m->last_elapsed_ms = 0;
 
     memset(&m->gps_csv, 0, sizeof(m->gps_csv));
     m->gps_csv_rev = 0;
@@ -124,11 +129,20 @@ void sr_model_reset_session(SrModel* m, bool also_reset_bloom) {
     m->last_unknown_len = 0;
 
     /* session / gps / last_tick / the bloom pointer / the rawlog pointer / firmware /
-     * firmware_rev / session_rev / gps_stop_rev are all preserved.
+     * firmware_rev / busy / busy_rev / sess / sess_rev / qual / qual_rev / qual_tick_ms /
+     * radio / radio_rev / session_rev / gps_stop_rev / wifi_stop_rev are all preserved.
      * firmware is device identity, not session data (ADR-016 decision 5).
+     * sess / sess_rev are the peer's last reported snapshot, same family as firmware /
+     * busy_rev, not this model's session data — reset must not clear them (N6).
+     * qual / qual_rev / qual_tick_ms are the same family (F2 board snapshot, not this
+     * model's counts) — F2 rev2 adds qual_tick_ms alongside them for the same reason.
+     * radio / radio_rev are the same family (T6.5 Radio: permission bits). radio_rev==0
+     * is unknown, not "both radios off".
      * session_rev is a cumulative transition count and reset must not clear it (ADR-017 decision 3).
      * gps_stop_rev follows the same convention and reset must not clear it (ADR-020 / ADR-017
-     * decision 3).
+     * decision 3). wifi_stop_rev is the same family (SHOW_INFO-clear confirm).
+     * up / up_rev are the same family (H2 board snapshot, not this model's counts).
+     * rank / rank_rev and cfg / cfg_rev are the same family (board snapshots).
      * gps_csv / gps_csv_rev are session data and are cleared (D12). gps / gps_stop_rev are not.
      * bloom / rawlog contents are cleared only on explicit request; reset does not touch the ring. */
     if(also_reset_bloom && m->bloom != NULL) {
@@ -150,12 +164,47 @@ static bool apply_started(SrModel* m, uint32_t tick_ms) {
         m->session_rev++;
         return true;
     }
+    /* Stock Marauder may emit StartingWardrive after the first CSV row already
+     * adopted Running. That is not an illegal transition on the generic dialect. */
+    if(sr_dialect_is_generic_marauder(&m->firmware)) {
+        return false;
+    }
     m->illegal_trans++;
     return false;
 }
 
-static bool apply_stopped(SrModel* m, SrStopReason reason) {
+bool sr_model_adopt_running(SrModel* m, uint32_t tick_ms) {
+    if(m == NULL) {
+        return false;
+    }
+    /* Reuses apply_started rather than repeating it: the Stopped branch's
+     * sr_model_reset_session() call is easy to forget, and forgetting it would carry the
+     * previous session's AP counts into the adopted one. */
+    return apply_started(m, tick_ms);
+}
+
+bool sr_model_seed_from_sess(SrModel* m, uint32_t tick_ms) {
+    if(m == NULL) {
+        return false;
+    }
+    /* Overwrite, not +=. Rows that landed between adopt and seed are already
+     * inside sess.ap / sess.ble; adding them here double-counts. */
+    m->ap_wifi = m->sess.ap;
+    m->ap_ble = m->sess.ble;
+    m->band_partial = true;
+    /* Unsigned subtraction: the furi tick wraps. Pair with scene_dash.c:78.
+     * Do not clamp when sess.ms > tick_ms — that is the common case of a
+     * freshly-booted Flipper joining a board that has been scanning for a while. */
+    m->started_tick_ms = tick_ms - m->sess.ms;
+    return true;
+}
+
+static bool apply_stopped(SrModel* m, SrStopReason reason, uint32_t tick_ms) {
+    if(reason == SrStopWifiTranRecv) {
+        m->wifi_stop_rev++;
+    }
     if(m->session == SrSessionRunning) {
+        m->last_elapsed_ms = tick_ms - m->started_tick_ms;
         m->session = SrSessionStopped;
         m->session_rev++;
         return true;
@@ -164,17 +213,31 @@ static bool apply_stopped(SrModel* m, SrStopReason reason) {
      * ADR-020 decision 4: a GPS / NMEA stop reply while idle is not an "illegal session
      * transition"; it is the normal close-out of an on-demand sample. Counting it in
      * illegal_trans would pollute the diagnostic bit on the T4.4 Session tab.
-     * SrStopWifiTranRecv while idle still counts as illegal -- that one really is.
+     * SrStopWifiTranRecv while idle is illegal on SigRoam / empty Version.
+     * Stock Marauder is handled below.
      */
     if(reason == SrStopGpsUpdates || reason == SrStopEndNmea) {
         m->gps_stop_rev++;
+        return false;
+    }
+    /*
+     * Stock Marauder: FAP may never have seen StartingWardrive, so session is
+     * still Idle when "Stopping WiFi tran/recv" arrives. Confirm the stop.
+     * Already-Stopped is a no-op (duplicate banner), not illegal.
+     */
+    if(sr_dialect_is_generic_marauder(&m->firmware) && reason == SrStopWifiTranRecv) {
+        if(m->session == SrSessionIdle) {
+            m->session = SrSessionStopped;
+            m->session_rev++;
+            return true;
+        }
         return false;
     }
     m->illegal_trans++;
     return false;
 }
 
-static bool apply_ap(SrModel* m, const SrApRecord* rec, bool ble) {
+static bool apply_ap(SrModel* m, const SrApRecord* rec, bool ble, uint32_t tick_ms) {
     SrApBrief b;
     uint8_t mac[6];
 
@@ -194,6 +257,11 @@ static bool apply_ap(SrModel* m, const SrApRecord* rec, bool ble) {
         m->ap_ble++;
     } else {
         m->ap_wifi++;
+        if(rec->channel >= 1 && rec->channel <= 14) {
+            m->ap_24++;
+        } else if(rec->channel > 14) {
+            m->ap_5++;
+        }
     }
     if(rec->datetime[0] != '\0') {
         b.flags = (uint8_t)(b.flags | SR_AP_FLAG_GPS);
@@ -219,6 +287,11 @@ static bool apply_ap(SrModel* m, const SrApRecord* rec, bool ble) {
     }
 
     recent_push(m, &b);
+    /* Generic Marauder: a live CSV row is L3 evidence the scan started.
+     * Only Idle: a late row after Stopped must not reopen the session. */
+    if(sr_dialect_is_generic_marauder(&m->firmware) && m->session == SrSessionIdle) {
+        (void)apply_started(m, tick_ms);
+    }
     return true;
 }
 
@@ -249,7 +322,7 @@ static bool apply_unknown(SrModel* m, const SrRawView* v) {
     m->unknown_lines++;
     /* Pass v->len rather than n: the ring truncates to 80 itself and sets cut. n is the 511 cap
      * of last_unknown, not the rawlog contract. */
-    if(m->rawlog != NULL) {
+    if(m->rawlog != NULL && !sr_rawlog_is_wire_version_line(v->text, v->len)) {
         sr_rawlog_push(m->rawlog, v->text, v->len);
     }
     return true;
@@ -268,11 +341,11 @@ bool sr_model_apply(SrModel* m, const SrEvent* ev, uint32_t tick_ms) {
     case SrEventScanStarted:
         return apply_started(m, tick_ms);
     case SrEventScanStopped:
-        return apply_stopped(m, ev->u.stop);
+        return apply_stopped(m, ev->u.stop, tick_ms);
     case SrEventApFound:
-        return apply_ap(m, &ev->u.ap, false);
+        return apply_ap(m, &ev->u.ap, false, tick_ms);
     case SrEventBleFound:
-        return apply_ap(m, &ev->u.ble, true);
+        return apply_ap(m, &ev->u.ble, true, tick_ms);
     case SrEventGps:
         m->gps = ev->u.gps;
         m->gps_blocks++;
@@ -280,6 +353,35 @@ bool sr_model_apply(SrModel* m, const SrEvent* ev, uint32_t tick_ms) {
     case SrEventFirmware:
         m->firmware = ev->u.firmware;
         m->firmware_rev++;
+        return true;
+    case SrEventBusy:
+        m->busy = ev->u.busy;
+        m->busy_rev++;
+        return true;
+    case SrEventSess:
+        m->sess = ev->u.sess;
+        m->sess_rev++;
+        return true;
+    case SrEventQual:
+        m->qual = ev->u.qual;
+        m->qual_rev++;
+        m->qual_tick_ms = tick_ms; /* F2 rev2 §1B staleness anchor */
+        return true;
+    case SrEventRadio:
+        m->radio = ev->u.radio;
+        m->radio_rev++;
+        return true;
+    case SrEventUp:
+        m->up = ev->u.up;
+        m->up_rev++;
+        return true;
+    case SrEventRank:
+        m->rank = ev->u.rank;
+        m->rank_rev++;
+        return true;
+    case SrEventCfg:
+        m->cfg = ev->u.cfg;
+        m->cfg_rev++;
         return true;
     case SrEventUnknown:
         return apply_unknown(m, &ev->u.unknown);

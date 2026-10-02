@@ -1,10 +1,26 @@
 #include "../sigroam.h"
+#include "../src/sr_sess_seed.h"
+#include "../src/sr_dialect.h"
 
 #include <string.h>
+
+_Static_assert(
+    (unsigned)SR_QUAL_REFRESH_PERIOD_TICKS == 5000u / (unsigned)SR_TICK_PERIOD_MS,
+    "E-2: SR_QUAL_REFRESH_PERIOD_TICKS must equal 5000 ms / SR_TICK_PERIOD_MS");
+_Static_assert(
+    (unsigned)SR_SCAN_CTL_QUAL_STALE_MS == (unsigned)SR_QUAL_STALE_MS,
+    "scan_ctl SD-dead window must match Qual stale");
+_Static_assert(
+    (unsigned)SR_SCAN_CTL_IDENT_MS == (unsigned)SR_HANDSHAKE_TIMEOUT_MS,
+    "Dash ident wait must match Probe handshake window");
+_Static_assert(
+    (unsigned)SR_SCAN_CTL_IDENT_MAX_SENDS == (unsigned)SR_HANDSHAKE_MAX_SENDS,
+    "Dash ident retry cap must match Probe info sends");
 
 enum {
     SigRoamDashEventScroll = 0,
     SigRoamDashEventOk = 1,
+    SigRoamDashEventPendingBack = 2,
 };
 
 static void dash_fill(SigRoamApp* app, SrDashModel* snap) {
@@ -51,6 +67,9 @@ static void dash_fill(SigRoamApp* app, SrDashModel* snap) {
 
     snap->ap_wifi = app->model.ap_wifi;
     snap->ap_ble = app->model.ap_ble;
+    /* 0/0 hides the band row; a partial split would not add up to AP. */
+    snap->ap_24 = app->model.band_partial ? 0u : app->model.ap_24;
+    snap->ap_5 = app->model.band_partial ? 0u : app->model.ap_5;
     snap->unique_est = app->model.unique_est;
     snap->with_gps_fix = app->model.with_gps_fix;
 
@@ -71,7 +90,23 @@ static void dash_fill(SigRoamApp* app, SrDashModel* snap) {
         wc.cmdack_at_send = app->scan_cmdack_at_send;
         snap->wait_stage = (uint8_t)sr_wait_stage_eval(&wc);
         snap->cmd_is_start = app->scan.cmd_is_start;
+        if(snap->wait_stage == (uint8_t)SrWaitStageNone &&
+           sr_scan_ctl_ident_hold(
+               app->dash_ident_pending,
+               app->model.firmware.version[0] != '\0',
+               app->dash_ident_tick_ms,
+               now,
+               (uint32_t)SR_SCAN_CTL_IDENT_MS)) {
+            snap->wait_stage = (uint8_t)SrWaitStageLink;
+        }
     }
+    snap->board_sealing = sr_scan_ctl_sealing_ex(
+        app->model.firmware.diag_seen,
+        app->model.firmware.diag_state,
+        app->model.busy_rev,
+        app->busy_rev_at_stop,
+        app->model.busy.state,
+        app->stop_seal_latched);
 
     if(app->model.session == SrSessionRunning) {
         /* Unsigned subtraction: the furi tick wraps. See sr_scan_ctl.h:39-40. */
@@ -79,6 +114,7 @@ static void dash_fill(SigRoamApp* app, SrDashModel* snap) {
     } else {
         snap->elapsed_ms = 0;
     }
+    snap->last_elapsed_ms = app->model.last_elapsed_ms;
 
     /* app->settings is GUI-thread exclusive (sigroam.h:90-96); we are on the GUI thread here, so read it directly. */
     snap->debug_rows = app->settings.debug_rows;
@@ -143,6 +179,27 @@ static void dash_fill(SigRoamApp* app, SrDashModel* snap) {
     snap->stream_top = top;
     snap->stream_count = count;
     snap->stream_n = n;
+
+    snap->qual = app->model.qual;
+    snap->qual_rev = app->model.qual_rev;
+    snap->qual_tick_ms = app->model.qual_tick_ms;
+    snap->sess_ms = app->model.sess.ms;
+    snap->radio = app->model.radio;
+    snap->radio_rev = app->model.radio_rev;
+    snap->up_q = app->model.up.q;
+    snap->up_known = app->model.up_rev != 0u;
+    snap->cfg_key = app->model.cfg.key;
+    snap->cfg_home = app->model.cfg.home;
+    snap->cfg_known = app->model.cfg_rev != 0u;
+    snap->pending_prompt = sr_pending_prompt_should_show(
+        app->pending_prompt_dismissed,
+        app->model.qual_rev,
+        (uint8_t)app->model.session,
+        snap->scan_ui,
+        snap->board_sealing,
+        sr_scan_ctl_sd_dead(app->model.qual_rev, app->model.qual.sd, app->model.qual_tick_ms, now),
+        snap->up_known,
+        snap->up_q);
 }
 
 void sigroam_dash_refresh(SigRoamApp* app) {
@@ -163,6 +220,11 @@ static void dash_view_scroll_cb(void* context) {
 static void dash_view_ok_cb(void* context) {
     SigRoamApp* app = context;
     view_dispatcher_send_custom_event(app->view_dispatcher, SigRoamDashEventOk);
+}
+
+static void dash_view_back_cb(void* context) {
+    SigRoamApp* app = context;
+    view_dispatcher_send_custom_event(app->view_dispatcher, SigRoamDashEventPendingBack);
 }
 
 /* The Back path does not hold app->mtx, so it must not read any field of app->model. */
@@ -338,6 +400,7 @@ static void dash_queue_cmd(SigRoamApp* app, bool is_start) {
      * cmdack_now == cmdack_at_send would hold forever -> stuck in SrWaitStageCmd forever. */
     app->scan_cmdack_at_send =
         sr_worker_cmdack_count(app->worker, is_start ? SrCmdAckStart : SrCmdAckStop);
+    app->scan_busy_rev_at_send = app->model.busy_rev;
     if(n > 0 && sr_worker_send_cmd(app->worker, cmd)) {
         app->scan.cmd_pending = true;
         app->scan.cmd_rejected = false;
@@ -348,21 +411,112 @@ static void dash_queue_cmd(SigRoamApp* app, bool is_start) {
     }
 }
 
+/* Generic Marauder: wait for Stopping WiFi (wifi_stop_rev) then queue wardrive.
+ * Must not queue wardrive while stopscan is still the in-flight worker command. */
+static bool dash_prestart_tick(SigRoamApp* app) {
+    bool confirmed;
+    bool timed_out;
+
+    if(!app->dash_prestart) {
+        return false;
+    }
+    confirmed = sr_dialect_show_info_clear_done(app->model.wifi_stop_rev, app->clear_stop_rev);
+    timed_out = (uint32_t)(furi_get_tick() - app->dash_prestart_tick_ms) >=
+                (uint32_t)SR_SCAN_CTL_TIMEOUT_MS;
+    if(!confirmed && !timed_out) {
+        if(!app->probe_stop_sent && !app->scan.cmd_pending) {
+            app->clear_stop_rev = app->model.wifi_stop_rev;
+            dash_queue_cmd(app, false);
+            if(app->scan.cmd_rejected && !app->scan.cmd_pending) {
+                app->scan.cmd_rejected = false;
+            }
+        }
+        return false;
+    }
+    if(app->scan.cmd_pending && !app->scan.cmd_is_start) {
+        app->scan.cmd_pending = false;
+        app->scan.cmd_rejected = false;
+    }
+    app->dash_prestart = false;
+    dash_queue_cmd(app, true);
+    return true;
+}
+
+/* upload is the OK path. Config missing a key or a home Wi-Fi only dismisses.
+ * A busy command slot keeps the popup so the next OK can retry.
+ * The popup is drawn from last tick's snapshot; the board may have been
+ * adopted as Running since, and firmware answers upload with STOP then. */
+static void dash_pending_dismiss(SigRoamApp* app, bool upload) {
+    bool blocked;
+
+    if(!upload || app->worker == NULL || app->model.session == SrSessionRunning) {
+        app->pending_prompt_dismissed = true;
+        return;
+    }
+    blocked = app->model.cfg_rev != 0u && (app->model.cfg.key == 0u || app->model.cfg.home == 0u);
+    if(blocked || sr_worker_send_cmd(app->worker, "upload\n")) {
+        app->pending_prompt_dismissed = true;
+    }
+}
+
 /* OK-key dispatch via sr_scan_ctl_on_ok (D12 A1). State is eval'd over a
  * stack copy, same convention as dash_fill. */
 static void dash_scan_toggle(SigRoamApp* app) {
     SrScanCtlCtx ctx;
     SrScanUiState st;
     SrScanAct act;
+    SrShowInfoClearAct clear;
 
     ctx = app->scan;
     ctx.session_rev_now = app->model.session_rev;
     ctx.session_now = app->model.session;
     st = sr_scan_ctl_eval(&ctx, furi_get_tick());
-    act = sr_scan_ctl_on_ok(st);
+    act = sr_scan_ctl_on_ok_upload_gate(
+        st,
+        sr_scan_ctl_sd_dead(
+            app->model.qual_rev, app->model.qual.sd, app->model.qual_tick_ms, furi_get_tick()),
+        sr_scan_ctl_sealing_ex(
+            app->model.firmware.diag_seen,
+            app->model.firmware.diag_state,
+            app->model.busy_rev,
+            app->busy_rev_at_stop,
+            app->model.busy.state,
+            app->stop_seal_latched),
+        sr_scan_ctl_ident_hold(
+            app->dash_ident_pending,
+            app->model.firmware.version[0] != '\0',
+            app->dash_ident_tick_ms,
+            furi_get_tick(),
+            (uint32_t)SR_SCAN_CTL_IDENT_MS),
+        sr_scan_ctl_uploading(app->model.firmware.diag_seen, app->model.firmware.diag_state));
+    act = sr_scan_ctl_retry_unconfirmed(
+        act, st, app->model.session == SrSessionRunning, app->scan.cmd_is_start);
     if(act == SrScanActSendStart) {
-        dash_queue_cmd(app, true);
+        if(app->dash_prestart) {
+            return;
+        }
+        clear = sr_dialect_show_info_clear_on_start_ex(
+            &app->model.firmware, app->probe_stop_sent, app->dash_ident_info_sent);
+        if(clear == SrShowInfoClearNone) {
+            dash_queue_cmd(app, true);
+            return;
+        }
+        if(clear == SrShowInfoClearWait &&
+           sr_dialect_show_info_clear_done(app->model.wifi_stop_rev, app->clear_stop_rev)) {
+            dash_queue_cmd(app, true);
+            return;
+        }
+        app->dash_prestart = true;
+        app->dash_prestart_tick_ms = furi_get_tick();
+        if(clear == SrShowInfoClearSendStop) {
+            app->clear_stop_rev = app->model.wifi_stop_rev;
+            dash_queue_cmd(app, false);
+            if(app->scan.cmd_rejected && !app->scan.cmd_pending) {
+                app->scan.cmd_rejected = false;
+            }
+        }
     } else if(act == SrScanActSendStop) {
+        app->dash_prestart = false;
         dash_queue_cmd(app, false);
     }
 }
@@ -383,6 +537,17 @@ static bool dash_scan_tick(SigRoamApp* app) {
     if(!app->scan.cmd_pending) {
         return false;
     }
+    /* An explicit refusal is not a timeout, and only the refusal may clear pending here.
+     * The board echoes the command (so cmdack advances and the L2 line goes away) and
+     * then answers "Busy: st=.. seal=..", meaning it will not act. Waiting on that
+     * forever would strand the UI on a question that has already been answered, while
+     * the timeout rule above must stay exactly as it is.
+     * != , not > : busy_rev wraps, same as cmdack and the furi tick. */
+    if(app->model.busy_rev != app->scan_busy_rev_at_send) {
+        app->scan.cmd_pending = false;
+        app->scan.cmd_rejected = false;
+        return true;
+    }
     ctx = app->scan;
     ctx.session_rev_now = app->model.session_rev;
     ctx.session_now = app->model.session;
@@ -391,9 +556,180 @@ static bool dash_scan_tick(SigRoamApp* app) {
        (st == SrScanUiIdle && !app->scan.cmd_is_start)) {
         app->scan.cmd_pending = false;
         app->scan.cmd_rejected = false; /* D12 A4: reject latched while pending is stale */
+        if(app->scan.cmd_is_start) {
+            app->stop_seal_latched = false;
+            app->dash_post_stop_info = false;
+        } else if(sr_scan_ctl_should_latch_stop(
+                      sr_dialect_is_sigroam(&app->model.firmware),
+                      app->model.firmware.diag_seen)) {
+            app->stop_seal_latched = true;
+            app->busy_rev_at_stop = app->model.busy_rev;
+            app->dash_post_stop_info = sr_dialect_dash_may_send_info(&app->model.firmware);
+            if(app->dash_post_stop_info && app->io != NULL && sr_io_is_open(app->io) &&
+               app->worker != NULL) {
+                /* Refresh Diag so the latch can clear at st=0/4. Do not arm
+                 * peer_sync / sess_seed (same constraint as Qual refresh). */
+                if(sr_worker_send_cmd(app->worker, "info\n")) {
+                    app->dash_post_stop_info = false;
+                }
+            }
+        }
         return true;
     }
     return false;
+}
+
+static bool dash_post_stop_info_tick(SigRoamApp* app) {
+    bool sealing;
+
+    if(!app->dash_post_stop_info) {
+        return false;
+    }
+    sealing = sr_scan_ctl_sealing_ex(
+        app->model.firmware.diag_seen,
+        app->model.firmware.diag_state,
+        app->model.busy_rev,
+        app->busy_rev_at_stop,
+        app->model.busy.state,
+        app->stop_seal_latched);
+    if(!sealing) {
+        app->dash_post_stop_info = false;
+        return false;
+    }
+    if(app->io == NULL || !sr_io_is_open(app->io) || app->worker == NULL) {
+        return false;
+    }
+    if(sr_worker_send_cmd(app->worker, "info\n")) {
+        app->dash_post_stop_info = false;
+        return true;
+    }
+    return false;
+}
+
+static bool dash_ident_tick(SigRoamApp* app) {
+    uint32_t now;
+
+    if(!app->dash_ident_pending) {
+        return false;
+    }
+    if(app->model.firmware.version[0] != '\0') {
+        app->dash_ident_pending = false;
+        return true;
+    }
+    now = furi_get_tick();
+    if(!sr_scan_ctl_ident_retry_due(
+           true,
+           false,
+           app->dash_ident_sends,
+           app->dash_ident_tick_ms,
+           now,
+           (uint32_t)SR_SCAN_CTL_IDENT_MS)) {
+        return false;
+    }
+    if(app->io == NULL || !sr_io_is_open(app->io) || app->worker == NULL) {
+        app->dash_ident_sends = (uint8_t)SR_SCAN_CTL_IDENT_MAX_SENDS;
+        return false;
+    }
+    if(sr_worker_send_cmd(app->worker, "info\n")) {
+        app->dash_ident_info_sent = true;
+        if(app->dash_ident_sends < 255u) {
+            app->dash_ident_sends++;
+        }
+        app->dash_ident_tick_ms = now;
+        if(!app->peer_sync_pending) {
+            app->peer_sync_fw_rev = app->model.firmware_rev;
+            app->peer_sync_pending = true;
+        }
+    } else {
+        app->dash_ident_sends = (uint8_t)SR_SCAN_CTL_IDENT_MAX_SENDS;
+    }
+    return true;
+}
+
+/* Card N1. The board keeps scanning after the app exits (scene_start.c:13-16), so a
+ * fresh launch can disagree with it; on_enter asks with `info` and this consumes the
+ * answer. Returns true when the model changed, so the caller refreshes the snapshot.
+ * Eval guards live in sr_peer_sync_eval(); disarm policy in sr_peer_sync_on_tick. */
+static bool dash_peer_sync_tick(SigRoamApp* app) {
+    SrPeerSyncTick t;
+
+    /* Disarm policy is entirely in sr_peer_sync_on_tick. Do not write
+     * peer_sync_pending = false on any other path in this function. */
+    t = sr_peer_sync_on_tick(
+        app->peer_sync_pending,
+        app->model.firmware_rev,
+        app->peer_sync_fw_rev,
+        app->model.firmware.diag_seen,
+        app->model.firmware.diag_state,
+        app->model.session,
+        app->scan.cmd_pending);
+    app->peer_sync_pending = t.keep_pending;
+    if(t.act != SrPeerSyncAdoptRunning) {
+        return false;
+    }
+    if(!sr_model_adopt_running(&app->model, furi_get_tick())) {
+        return false;
+    }
+    /* Seed is a second, idempotent step. Sess: is the last line of #info
+     * (n6-fap-sess-consume.md §2) so it may not have arrived yet; leave
+     * pending set and let dash_sess_seed_tick retry every tick. */
+    app->sess_seed_pending = true;
+    return true;
+}
+
+/* Card N6. Overlay the board's Sess: totals onto an adopted session.
+ * Every guard lives in sr_sess_seed_eval(); this function only moves data.
+ * Re-enter Dash snapshots sess_rev before the new info; seed waits for
+ * sess_rev != that snapshot, so a Probe leftover cannot stick (C3/C4). */
+static bool dash_sess_seed_tick(SigRoamApp* app) {
+    if(sr_sess_seed_eval(
+           app->model.sess_rev,
+           app->sess_seed_rev_at_send,
+           app->model.sess.ms,
+           app->model.session,
+           app->sess_seed_pending) != SrSessSeedApply) {
+        return false;
+    }
+    sr_model_seed_from_sess(&app->model, furi_get_tick());
+    app->sess_seed_pending = false;
+    return true;
+}
+
+/*
+ * F2 rev2 §1A. On SigRoam firmware, Dash on_enter sends `info` once; without a
+ * repeat, the F2 headline freezes at whatever Qual: it read on entry --
+ * elapsed_ms keeps climbing underneath a stale verdict (false-WARN /
+ * false-OK, docs/exec-plans/f2-capture-health-rev2.md §1). This resends
+ * `info` every SR_QUAL_REFRESH_PERIOD_TICKS ticks while Dash is active.
+ *
+ * `info` is read-only on SigRoam firmware only. Stock Marauder info
+ * sets SHOW_INFO and makes scanning() true, which swallows wardrive.
+ * Skip the send unless sr_dialect_dash_may_send_info.
+ *
+ * HARD CONSTRAINT (card §1A): this function must NEVER write
+ * app->peer_sync_pending or app->sess_seed_pending. sr_peer_sync_on_tick
+ * returns SrPeerSyncNone whenever cur == SrSessionRunning (sr_peer_sync.h
+ * :111-115) and sr_sess_seed_eval returns SrSessSeedNone whenever
+ * seed_pending is false (sr_sess_seed.h:42-46) -- as long as this function
+ * never arms either flag, the reply this triggers can only refresh
+ * model.qual / model.qual_tick_ms, never re-adopt or re-seed. tools/
+ * host_test/test_f2_health2.c locks this invariant at the pure-function
+ * level; the Makefile's qual_refresh_guard locks it at the source level.
+ *
+ * sr_worker_send_cmd returning false (queue full / link busy) is not
+ * retried or counted; the next period tries again (card §1A).
+ */
+static void dash_qual_refresh_tick(SigRoamApp* app) {
+    if(!sr_qual_refresh_due(app->tick_n, (uint32_t)SR_QUAL_REFRESH_PERIOD_TICKS)) {
+        return;
+    }
+    if(!sr_dialect_dash_may_send_info(&app->model.firmware)) {
+        return;
+    }
+    if(app->io == NULL || !sr_io_is_open(app->io) || app->worker == NULL) {
+        return;
+    }
+    (void)sr_worker_send_cmd(app->worker, "info\n");
 }
 
 void sigroam_scene_dash_on_enter(void* context) {
@@ -402,6 +738,32 @@ void sigroam_scene_dash_on_enter(void* context) {
     /* Entered via the custom callback, so app->mtx is already held. Do not acquire again. No blocking IO. */
     sr_view_dash_set_callback(app->dash, dash_view_scroll_cb, app);
     sr_view_dash_set_ok_callback(app->dash, dash_view_ok_cb, app);
+    sr_view_dash_set_back_callback(app->dash, dash_view_back_cb, app);
+    /* Card N1: SigRoam `info` is read-only. Stock Marauder info is not —
+     * SHOW_INFO swallows wardrive. Empty Version: bootstrap `info` and hold
+     * OK until Version (retry once after SR_SCAN_CTL_IDENT_MS). After Version
+     * is known, periodic refresh still uses sr_dialect_dash_may_send_info. */
+    app->peer_sync_fw_rev = app->model.firmware_rev;
+    app->sess_seed_rev_at_send = app->model.sess_rev;
+    app->peer_sync_pending = false;
+    app->dash_prestart = false;
+    app->dash_post_stop_info = false;
+    app->dash_ident_pending = false;
+    app->dash_ident_info_sent = false;
+    app->dash_ident_sends = 0;
+    if(app->io != NULL && sr_io_is_open(app->io) && app->worker != NULL) {
+        if(app->model.firmware.version[0] == '\0') {
+            app->dash_ident_tick_ms = furi_get_tick();
+            app->dash_ident_pending = true;
+            if(sr_worker_send_cmd(app->worker, "info\n")) {
+                app->dash_ident_info_sent = true;
+                app->dash_ident_sends = 1;
+                app->peer_sync_pending = true;
+            }
+        } else if(sr_dialect_dash_may_send_info(&app->model.firmware)) {
+            app->peer_sync_pending = sr_worker_send_cmd(app->worker, "info\n");
+        }
+    }
     sigroam_dash_refresh(app);
     sr_notify_backlight_enforce(app->notify, sr_settings_effective_backlight(&app->settings));
     view_dispatcher_switch_to_view(app->view_dispatcher, SigRoamViewDash);
@@ -416,8 +778,14 @@ bool sigroam_scene_dash_on_event(void* context, SceneManagerEvent event) {
             sigroam_dash_refresh(app);
             return true;
         }
+        if(event.event == SigRoamDashEventPendingBack) {
+            dash_pending_dismiss(app, false);
+            sigroam_dash_refresh(app);
+            return true;
+        }
         if(event.event == SigRoamDashEventOk) {
             uint8_t tab = (uint8_t)SR_VIEW_TAB_DASH;
+            bool pending = false;
             View* v = sr_view_dash_get_view(app->dash);
             if(v != NULL) {
                 with_view_model(
@@ -426,6 +794,7 @@ bool sigroam_scene_dash_on_event(void* context, SceneManagerEvent event) {
                     {
                         if(cur != NULL) {
                             tab = cur->tab;
+                            pending = cur->pending_prompt;
                         }
                     },
                     false);
@@ -459,7 +828,11 @@ bool sigroam_scene_dash_on_event(void* context, SceneManagerEvent event) {
                     dash_poi_send(app);
                 }
             } else if(tab == (uint8_t)SR_VIEW_TAB_DASH) {
-                dash_scan_toggle(app);
+                if(pending) {
+                    dash_pending_dismiss(app, true);
+                } else {
+                    dash_scan_toggle(app);
+                }
             }
             sigroam_dash_refresh(app);
             return true;
@@ -468,17 +841,48 @@ bool sigroam_scene_dash_on_event(void* context, SceneManagerEvent event) {
     }
 
     if(event.type == SceneManagerEventTypeTick) {
-        bool need = dash_gps_tick(app);
+        /* Adoption runs first: dash_scan_tick and dash_gps_tick both read
+         * model.session, and they must see the adopted value in the same tick.
+         * Seeding runs next so those ticks also see the board's ap/ble/elapsed. */
+        bool need = dash_peer_sync_tick(app);
+        if(dash_ident_tick(app)) {
+            need = true;
+        }
+        if(dash_sess_seed_tick(app)) {
+            need = true;
+        }
+        if(dash_gps_tick(app)) {
+            need = true;
+        }
         if(dash_scan_tick(app)) {
+            need = true;
+        }
+        if(dash_post_stop_info_tick(app)) {
+            need = true;
+        }
+        if(dash_prestart_tick(app)) {
             need = true;
         }
         if(dash_poi_tick(app)) {
             need = true;
         }
-        SrAlertKind ak = sr_alert_eval(
-            &app->alert, app->model.gps_csv_rev, app->model.gps_csv.fix, furi_get_tick());
-        if(ak != SrAlertNone) {
-            sr_notify_alert(app->notify, ak, &app->settings);
+        dash_qual_refresh_tick(app);
+        {
+            uint32_t now_ms = furi_get_tick();
+            SrAlertKind ak =
+                sr_alert_eval(&app->alert, app->model.gps_csv_rev, app->model.gps_csv.fix, now_ms);
+            if(ak != SrAlertNone) {
+                sr_notify_alert(app->notify, ak, &app->settings);
+            } else {
+                bool net = sr_newnet_eval(
+                    &app->newnet,
+                    app->model.unique_est,
+                    app->model.session == SrSessionRunning,
+                    now_ms);
+                if(net && app->settings.newnet) {
+                    sr_notify_newnet(app->notify, &app->settings);
+                }
+            }
         }
         if(need) {
             sigroam_dash_refresh(app);
@@ -498,5 +902,6 @@ void sigroam_scene_dash_on_exit(void* context) {
     if(app != NULL && app->dash != NULL) {
         sr_view_dash_set_callback(app->dash, NULL, NULL);
         sr_view_dash_set_ok_callback(app->dash, NULL, NULL);
+        sr_view_dash_set_back_callback(app->dash, NULL, NULL);
     }
 }

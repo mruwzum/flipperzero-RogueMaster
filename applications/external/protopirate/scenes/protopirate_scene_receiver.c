@@ -9,9 +9,12 @@
 
 #define TAG "ProtoPirateSceneRx"
 
+#define DEFERRED_STORAGE_TIME 1000
+
 // Forward declaration
 void protopirate_scene_receiver_view_callback(ProtoPirateCustomEvent event, void* context);
 static void protopirate_scene_receiver_start_rx_stack(ProtoPirateApp* app);
+static void protopirate_scene_receiver_process_deferred_storage(ProtoPirateApp* app);
 
 static void protopirate_scene_receiver_update_statusbar(void* context) {
     furi_check(context);
@@ -51,6 +54,10 @@ static void protopirate_scene_receiver_callback(
 
     FURI_LOG_I(TAG, "=== SIGNAL DECODED (%s) ===", decoder_base->protocol->name);
 
+    //If save is happening, dont attempt to add to history yet.
+    while(app->deferred_storage_in_progress)
+        furi_delay_ms(25);
+
     uint16_t count_before = protopirate_history_get_item(app->txrx->history);
     bool added =
         protopirate_history_add_to_history(app->txrx->history, decoder_base, app->txrx->preset);
@@ -76,11 +83,21 @@ static void protopirate_scene_receiver_callback(
         protopirate_view_receiver_set_idx_menu(app->protopirate_receiver, last_index);
 
         uint16_t new_idx = protopirate_history_get_item(app->txrx->history) - 1;
+
+        bool start_timer = false;
         if(app->auto_save) {
             protopirate_history_mark_auto_save_pending(app->txrx->history, new_idx);
+            start_timer = true;
         }
         if(app->check_saved) {
             protopirate_history_mark_saved_match_pending(app->txrx->history, new_idx);
+            start_timer = true;
+        }
+
+        //Restart the timer.
+        if(start_timer) {
+            furi_timer_stop(app->deferred_storage_timer);
+            furi_timer_start(app->deferred_storage_timer, DEFERRED_STORAGE_TIME);
         }
 
         view_dispatcher_send_custom_event(
@@ -206,11 +223,15 @@ static void protopirate_scene_receiver_process_saved_match(ProtoPirateApp* app) 
 }
 
 static void protopirate_scene_receiver_process_deferred_storage(ProtoPirateApp* app) {
+    app->deferred_storage_in_progress = true;
     if(protopirate_scene_receiver_process_auto_save(app)) {
         return;
     }
 
     protopirate_scene_receiver_process_saved_match(app);
+
+    furi_timer_stop(app->deferred_storage_timer);
+    app->deferred_storage_in_progress = false;
 }
 
 static bool protopirate_scene_receiver_bind_rx_stack(ProtoPirateApp* app) {
@@ -251,15 +272,7 @@ static void protopirate_scene_receiver_start_rx_stack(ProtoPirateApp* app) {
         app->txrx->hopper_state = ProtoPirateHopperStateRunning;
     }
 
-    const char* preset_name = furi_string_get_cstr(app->txrx->preset->name);
-    uint8_t* preset_data = subghz_setting_get_preset_data_by_name(app->setting, preset_name);
-
-    if(preset_data == NULL) {
-        FURI_LOG_E(TAG, "Failed to get preset data for %s, using AM650", preset_name);
-        preset_data = subghz_setting_get_preset_data_by_name(app->setting, "AM650");
-    }
-
-    protopirate_begin(app, preset_data);
+    protopirate_begin(app, app->txrx->preset->data);
 
     uint32_t frequency = app->txrx->preset->frequency;
     if(app->txrx->hopper_state == ProtoPirateHopperStateRunning) {
@@ -277,6 +290,10 @@ static void protopirate_scene_receiver_start_rx_stack(ProtoPirateApp* app) {
     protopirate_rx(app, frequency);
 
     FURI_LOG_I(TAG, "RX started, state: %d", app->txrx->txrx_state);
+}
+
+void deferred_storage_timer_callback(void* app) {
+    protopirate_scene_receiver_process_deferred_storage(app);
 }
 
 void protopirate_scene_receiver_on_enter(void* context) {
@@ -322,6 +339,9 @@ void protopirate_scene_receiver_on_enter(void* context) {
 
     protopirate_scene_receiver_update_statusbar(app);
 
+    app->deferred_storage_timer =
+        furi_timer_alloc(deferred_storage_timer_callback, FuriTimerTypePeriodic, app);
+
 #ifndef REMOVE_LOGS
     bool is_external =
         app->txrx->radio_device ? radio_device_loader_is_external(app->txrx->radio_device) : false;
@@ -338,6 +358,9 @@ void protopirate_scene_receiver_on_enter(void* context) {
     view_dispatcher_switch_to_view(app->view_dispatcher, ProtoPirateViewReceiver);
     view_dispatcher_send_custom_event(
         app->view_dispatcher, ProtoPirateCustomEventReceiverDeferredRxStart);
+
+    //Kill Config if it exists now to save memory.
+    protopirate_variable_item_list_free(app);
 }
 
 static void protopirate_scene_receiver_handle_back(ProtoPirateApp* app) {
@@ -429,8 +452,6 @@ bool protopirate_scene_receiver_on_event(void* context, SceneManagerEvent event)
             break;
         }
     } else if(event.type == SceneManagerEventTypeTick) {
-        protopirate_scene_receiver_process_deferred_storage(app);
-
         if(app->txrx->hopper_state != ProtoPirateHopperStateOFF) {
             if(protopirate_hopper_update(app) && protopirate_scene_receiver_bind_rx_stack(app)) {
                 protopirate_rx(app, app->txrx->preset->frequency);
@@ -472,6 +493,9 @@ void protopirate_scene_receiver_on_exit(void* context) {
     ProtoPirateApp* app = context;
 
     FURI_LOG_I(TAG, "=== EXITING RECEIVER SCENE ===");
+    furi_timer_stop(app->deferred_storage_timer);
+    furi_timer_free(app->deferred_storage_timer);
+    app->deferred_storage_timer = NULL;
 
     const bool leaving_for_subscene =
         (scene_manager_get_scene_state(app->scene_manager, ProtoPirateSceneReceiver) == 1);

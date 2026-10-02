@@ -95,6 +95,10 @@ static bool host_psa_bf_plugin_ensure_loaded(void* app) {
     return protopirate_psa_bf_plugin_ensure_loaded((ProtoPirateApp*)app);
 }
 
+static void host_psa_bf_plugin_unload_if_idle(void* app) {
+    protopirate_psa_bf_plugin_unload_if_idle(app);
+}
+
 static void host_psa_bf_context_release(void* app) {
     protopirate_psa_bf_context_release((ProtoPirateApp*)app);
 }
@@ -123,6 +127,7 @@ static const ProtoPirateToolSceneHostApi protopirate_tool_scene_host_api = {
     .receiver_reset_menu = protopirate_view_receiver_reset_menu,
     .receiver_sync_menu_from_history = protopirate_view_receiver_sync_menu_from_history,
     .psa_bf_plugin_ensure_loaded = host_psa_bf_plugin_ensure_loaded,
+    .psa_bf_plugin_unload_if_idle = host_psa_bf_plugin_unload_if_idle,
     .psa_bf_context_release = host_psa_bf_context_release,
 };
 
@@ -131,14 +136,14 @@ static void protopirate_tool_scene_plugin_unload(ProtoPirateApp* app) {
 
     app->tool_scene_plugin = NULL;
 
-    if(app->plugin_manager) {
-        plugin_manager_free(app->plugin_manager);
-        app->plugin_manager = NULL;
+    if(app->tool_scene_plugin_manager) {
+        plugin_manager_free(app->tool_scene_plugin_manager);
+        app->tool_scene_plugin_manager = NULL;
     }
 
-    if(app->plugin_resolver) {
-        composite_api_resolver_free(app->plugin_resolver);
-        app->plugin_resolver = NULL;
+    if(app->tool_scene_plugin_resolver) {
+        composite_api_resolver_free(app->tool_scene_plugin_resolver);
+        app->tool_scene_plugin_resolver = NULL;
     }
 }
 
@@ -198,8 +203,8 @@ static bool protopirate_tool_scene_plugin_ensure_loaded(
         return false;
     }
 
-    app->plugin_resolver = resolver;
-    app->plugin_manager = manager;
+    app->tool_scene_plugin_resolver = resolver;
+    app->tool_scene_plugin_manager = manager;
     app->tool_scene_plugin = plugin;
     app->tool_scene_plugin_kind = kind;
     plugin->set_host_api(&protopirate_tool_scene_host_api);

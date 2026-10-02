@@ -58,7 +58,7 @@ App(
     fap_author="RocketGod-git & xMasterX",
     fap_weburl="https://github.com/RocketGod-git/ProtoPirate",
     #  fap_weburl="https://protopirate.net/ProtoPirate/ProtoPirate",
-    fap_version="3.3",
+    fap_version="3.5",
     fap_description="Decode car key fob signals from Sub-GHz",
 )
 
@@ -434,13 +434,12 @@ App(
     apptype=FlipperAppType.PLUGIN,
     entry_point="protopirate_config_plugin_ep",
     requires=["proto_pirate"],
+    cdefines=["PROTOPIRATE_CONFIG_PLUGIN_BUILD"],
     sources=[
-        "helpers/protopirate_protocol_plugin_host.c",
         "helpers/protopirate_models.c",
-        "helpers/protopirate_txrx.c",
         "helpers/variable_item_list.c",
-        "protocols/protocol_items.c",
         "scenes/plugins/protopirate_config_plugin.c",
     ],
+    fap_icon_assets="images",
     fal_embedded=True,
 )

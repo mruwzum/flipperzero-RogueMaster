@@ -80,6 +80,10 @@ static void host_receiver_info_rebuild_widget(void* app) {
     protopirate_receiver_info_rebuild_normal_widget(app);
 }
 
+static void host_saved_info_rebuild_widget(void* app) {
+    protopirate_scene_saved_info_on_enter(app);
+}
+
 static void host_subdecode_signal_info_refresh(void* app) {
     host_send_custom_event(app, ProtoPirateCustomEventSubDecodeUpdate);
 }
@@ -87,6 +91,10 @@ static void host_subdecode_signal_info_refresh(void* app) {
 static void host_scene_previous(void* app) {
     ProtoPirateApp* a = (ProtoPirateApp*)app;
     if(a) scene_manager_previous_scene(a->scene_manager);
+}
+
+static const char* host_get_loaded_file_path(void* app) {
+    return furi_string_get_cstr(((ProtoPirateApp*)app)->loaded_file_path);
 }
 
 static const ProtoPiratePsaBfHostApi protopirate_psa_bf_host_api = {
@@ -102,22 +110,24 @@ static const ProtoPiratePsaBfHostApi protopirate_psa_bf_host_api = {
     .notification_error = host_notification_error,
     .notification_success = host_notification_success,
     .receiver_info_rebuild_widget = host_receiver_info_rebuild_widget,
+    .saved_info_rebuild_widget = host_saved_info_rebuild_widget,
     .subdecode_signal_info_refresh = host_subdecode_signal_info_refresh,
     .scene_previous = host_scene_previous,
+    .get_loaded_file_path = host_get_loaded_file_path,
 };
 
 static void psa_bf_plugin_unload(ProtoPirateApp* app) {
     furi_check(app);
     app->psa_bf_plugin = NULL;
 
-    if(app->plugin_manager) {
-        plugin_manager_free(app->plugin_manager);
-        app->plugin_manager = NULL;
+    if(app->psa_bf_plugin_manager) {
+        plugin_manager_free(app->psa_bf_plugin_manager);
+        app->psa_bf_plugin_manager = NULL;
     }
 
-    if(app->plugin_resolver) {
-        composite_api_resolver_free(app->plugin_resolver);
-        app->plugin_resolver = NULL;
+    if(app->psa_bf_plugin_resolver) {
+        composite_api_resolver_free(app->psa_bf_plugin_resolver);
+        app->psa_bf_plugin_resolver = NULL;
     }
 }
 
@@ -126,7 +136,7 @@ bool protopirate_psa_bf_plugin_ensure_loaded(ProtoPirateApp* app) {
 
     if(app->psa_bf_plugin) return true;
 
-    if(app->plugin_manager || app->plugin_resolver) {
+    if(app->psa_bf_plugin_manager || app->psa_bf_plugin_resolver) {
         psa_bf_plugin_unload(app);
     }
 
@@ -163,8 +173,8 @@ bool protopirate_psa_bf_plugin_ensure_loaded(ProtoPirateApp* app) {
         return false;
     }
 
-    app->plugin_resolver = resolver;
-    app->plugin_manager = manager;
+    app->psa_bf_plugin_resolver = resolver;
+    app->psa_bf_plugin_manager = manager;
     app->psa_bf_plugin = plugin;
     plugin->set_host_api(&protopirate_psa_bf_host_api);
     return true;

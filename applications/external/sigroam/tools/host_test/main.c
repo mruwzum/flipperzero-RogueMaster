@@ -16,6 +16,21 @@ int test_wait_stage_run(void);
 int test_resync_run(void);
 int test_alert_run(void);
 int test_poi_run(void);
+int test_peer_sync_run(void);
+int test_sess_seed_run(void);
+int test_qual_parse_run(void);
+int test_capture_health_run(void);
+int test_f2_health2_run(void);
+int test_radio_dash_run(void);
+int test_dialect_run(void);
+int test_probe_fmt_run(void);
+int test_up_parse_run(void);
+int test_upload_prompt_run(void);
+int test_band_run(void);
+int test_newnet_run(void);
+int test_idle_summary_run(void);
+int test_cfg_parse_run(void);
+int test_peer_watch_run(void);
 
 int main(void) {
     int fails = 0;
@@ -36,6 +51,21 @@ int main(void) {
     fails += test_resync_run();
     fails += test_alert_run();
     fails += test_poi_run();
+    fails += test_peer_sync_run();
+    fails += test_sess_seed_run();
+    fails += test_qual_parse_run();
+    fails += test_capture_health_run();
+    fails += test_f2_health2_run();
+    fails += test_radio_dash_run();
+    fails += test_dialect_run();
+    fails += test_probe_fmt_run();
+    fails += test_up_parse_run();
+    fails += test_upload_prompt_run();
+    fails += test_band_run();
+    fails += test_newnet_run();
+    fails += test_idle_summary_run();
+    fails += test_cfg_parse_run();
+    fails += test_peer_watch_run();
 
     if(fails != 0) {
         printf("FAILED: %d assertion(s)\n", fails);

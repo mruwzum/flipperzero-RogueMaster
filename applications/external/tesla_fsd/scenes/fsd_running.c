@@ -72,6 +72,8 @@ static void fsd_update_display(TeslaFSDApp* app, uint32_t uptime_ms) {
     char line2[44];
     if(state.tesla_ota_in_progress) {
         snprintf(line2, sizeof(line2), "OTA — TX paused [%s]", mode_str);
+    } else if(state.autopark_tx_block) {
+        snprintf(line2, sizeof(line2), "Autopark — TX pause [%s]", mode_str);
     } else {
         snprintf(
             line2,
@@ -157,7 +159,6 @@ static int32_t fsd_running_worker(void* context) {
     state.extra_hazard_lights = app->extra_hazard_lights;
     state.extra_wiper_off = app->extra_auto_wipers_off;
     state.extra_park_inject = false;
-    state.extra_steering_mode = app->extra_steering_mode;
     state.extra_highbeam_strobe = app->extra_highbeam_strobe;
     state.extra_turn_left = app->extra_turn_left;
     state.extra_turn_right = app->extra_turn_right;
@@ -385,6 +386,8 @@ static int32_t fsd_running_worker(void* context) {
                     fsd_handle_vcright_status(&state, &frame);
                 } else if(frame.canId == CAN_ID_DI_SPEED) {
                     fsd_handle_di_speed(&state, &frame);
+                    state.last_speed_tick_ms =
+                        now; // freshness for the Autopark release gate (#180)
                 } else if(frame.canId == CAN_ID_ESP_STATUS) {
                     fsd_handle_esp_status(&state, &frame);
                 } else if(frame.canId == CAN_ID_DAS_STATUS) {
@@ -500,6 +503,11 @@ static int32_t fsd_running_worker(void* context) {
                 // parsers so the override wins; stamps das_ctx_seen_ms for the
                 // nag killer's freshness gate on the worker clock.
                 fsd_apply_signal_config(&state, &frame, now);
+
+                // In-car Autopark TX pause (#180): after the DAS/speed frames are
+                // parsed, maintain the episode + block so fsd_can_transmit() gates
+                // every TX path during an Autopark run.
+                fsd_autopark_update(&state, now);
 
                 if((now - last_display) >= furi_ms_to_ticks(FSD_DISPLAY_REFRESH_MS)) {
                     furi_mutex_acquire(app->mutex, FuriWaitForever);

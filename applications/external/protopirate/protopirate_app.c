@@ -31,7 +31,9 @@ void config_plugin_unload(ProtoPirateApp* app) {
     }
 }
 
-bool config_plugin_load(ProtoPirateApp* app) {
+bool config_plugin_load(
+    ProtoPirateApp* app,
+    const ProtoPirateConfigSceneHostApi* protopirate_config_scene_host_api) {
     furi_check(app);
 
     if(app->config_plugin) return true;
@@ -66,7 +68,7 @@ bool config_plugin_load(ProtoPirateApp* app) {
     }
 
     const ProtoPirateConfigPlugin* plugin = plugin_manager_get_ep(manager, 0U);
-    if(!plugin || !plugin->on_enter || !plugin->on_exit) {
+    if(!plugin || !plugin->on_enter) {
         FURI_LOG_E(TAG, "Config plugin entry point is invalid");
         plugin_manager_free(manager);
         composite_api_resolver_free(resolver);
@@ -76,6 +78,7 @@ bool config_plugin_load(ProtoPirateApp* app) {
     app->plugin_resolver = resolver;
     app->plugin_manager = manager;
     app->config_plugin = plugin;
+    plugin->set_host_api(protopirate_config_scene_host_api);
     return true;
 }
 
@@ -113,6 +116,9 @@ ProtoPirateApp* protopirate_app_alloc() {
 
     // View Dispatcher
     app->view_dispatcher = view_dispatcher_alloc();
+#if defined(FW_ORIGIN_RM)
+    view_dispatcher_enable_queue(app->view_dispatcher);
+#endif
     app->scene_manager = scene_manager_alloc(&protopirate_scene_handlers, app);
 
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
@@ -166,6 +172,7 @@ ProtoPirateApp* protopirate_app_alloc() {
     app->setting = subghz_setting_alloc();
     app->loaded_file_path = NULL;
     app->start_tx_time = 0;
+    app->deferred_storage_timer = NULL;
     subghz_setting_load(app->setting, EXT_PATH("subghz/assets/setting_user.txt"));
 
     // Apply loaded frequency and preset, with validation
@@ -218,7 +225,7 @@ ProtoPirateApp* protopirate_app_alloc() {
         settings.auto_save,
         settings.hopping_enabled);
 
-    config_plugin_load(app);
+    config_plugin_load(app, NULL);
     app->car_models_count = app->config_plugin->car_model_get_count();
     app->selected_model = malloc(sizeof(ProtoPirateCarModel));
     app->selected_model->name = furi_string_alloc();

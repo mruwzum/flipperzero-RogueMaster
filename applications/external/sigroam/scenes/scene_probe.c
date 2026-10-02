@@ -1,11 +1,9 @@
 #include "../sigroam.h"
+#include "../src/sr_dialect.h"
+#include "../src/sr_probe_fmt.h"
 
 #include <stdio.h>
 #include <string.h>
-
-static const char* field_or_q(const char* s) {
-    return (s != NULL && s[0] != '\0') ? s : "?";
-}
 
 static void sigroam_scene_probe_fill(SigRoamApp* app, SrHandshakeState st) {
     const SrFirmwareInfo* fw = &app->model.firmware;
@@ -27,9 +25,10 @@ static void sigroam_scene_probe_fill(SigRoamApp* app, SrHandshakeState st) {
                 "\e#Not connected\n"
                 "%s\n"
                 "\n"
-                "Need a Marauder\n"
-                "board on GPIO\n"
-                "13/14, 5V on pin 1.\n"
+                "Need Scout Lite\n"
+                "running SigRoam\n"
+                "on GPIO 13/14,\n"
+                "5V on pin 1.\n"
                 "Check wiring and\n"
                 "Log Device Off.\n"
                 "\n"
@@ -42,26 +41,28 @@ static void sigroam_scene_probe_fill(SigRoamApp* app, SrHandshakeState st) {
         }
         break;
     case SrHandshakeWaiting:
-        snprintf(
-            app->probe_text,
-            sizeof(app->probe_text),
-            "\e#Probing...\n"
-            "\n"
-            "Sent: info\n"
-            "Waiting up to 1.5s");
+        if(app->hs.sends >= 2u) {
+            snprintf(
+                app->probe_text,
+                sizeof(app->probe_text),
+                "\e#Probing...\n"
+                "\n"
+                "Retrying info\n"
+                "Waiting up to 1.5s");
+        } else {
+            snprintf(
+                app->probe_text,
+                sizeof(app->probe_text),
+                "\e#Probing...\n"
+                "\n"
+                "Sent: info\n"
+                "Waiting up to 1.5s");
+        }
         break;
     case SrHandshakeOk:
-        snprintf(
-            app->probe_text,
-            sizeof(app->probe_text),
-            "\e#%s\n"
-            "Version: %s\n"
-            "Hardware: %s\n"
-            "ESP-IDF: %s\n",
-            field_or_q(fw->firmware),
-            field_or_q(fw->version),
-            field_or_q(fw->hardware),
-            field_or_q(fw->esp_idf));
+        /* ADR-027: product identity, not UART Version: / ESP-IDF:. Diag stays. */
+        (void)sr_probe_fmt_ok(
+            fw, SR_SCANNER_VERSION, SR_BRAND_LINE, app->probe_text, sizeof(app->probe_text));
         break;
     case SrHandshakeUnknownFw:
         snprintf(
@@ -78,19 +79,18 @@ static void sigroam_scene_probe_fill(SigRoamApp* app, SrHandshakeState st) {
             fw->firmware[0] != '\0' ? fw->firmware : "(no name)");
         break;
     case SrHandshakeNoReply:
+        /* Keep listening: a late Firmware: still lifts eval to Ok. Do not
+         * paint a terminal No reply that then jumps to the firmware page. */
         snprintf(
             app->probe_text,
             sizeof(app->probe_text),
-            "\e#No reply\n"
-            "\n"
-            "Nothing in 1.5s.\n"
+            "\e#Probing...\n"
             "\n"
             "Board may still be\n"
-            "booting. Wait a few\n"
-            "seconds and retry.\n"
+            "booting. Waiting.\n"
             "\n"
-            "Else check pin 13/14\n"
-            "wiring, board power,\n"
+            "Back to leave.\n"
+            "Else pin 13/14, 5V,\n"
             "and baud (%lu).",
             (unsigned long)app->settings.baud);
         break;
@@ -110,6 +110,51 @@ static void sigroam_scene_probe_draw(SigRoamApp* app, SrHandshakeState st) {
     app->hs_rev_shown = app->model.firmware_rev;
 }
 
+/* Queue `info\n` and start a new 1.5s window. On failure leave ctx untouched
+ * so a retry that hits a full worker slot still evaluates as NoReply. */
+static bool probe_queue_info(SigRoamApp* app) {
+    SrIoStats stats;
+
+    if(app == NULL || app->io == NULL || !sr_io_is_open(app->io) || app->worker == NULL) {
+        return false;
+    }
+    if(!sr_worker_send_cmd(app->worker, "info\n")) {
+        return false;
+    }
+    sr_io_get_stats(app->io, &stats);
+    app->hs.rx_bytes_at_send = stats.rx_bytes;
+    app->hs.rx_bytes_now = stats.rx_bytes;
+    app->hs.fw_rev_at_send = app->model.firmware_rev;
+    app->hs.fw_rev_now = app->model.firmware_rev;
+    app->hs.fw_kind = app->model.firmware.kind;
+    app->hs.sent_tick_ms = furi_get_tick();
+    app->hs.sent = true;
+    if(app->hs.sends < 255u) {
+        app->hs.sends++;
+    }
+    return true;
+}
+
+/* Generic Marauder only. Does not touch handshake ctx. Single worker slot. */
+static bool probe_queue_stopscan(SigRoamApp* app) {
+    const SrSourceCodec* codec;
+    char cmd[SR_WORKER_CMD_MAX];
+    size_t n;
+
+    if(app == NULL || app->io == NULL || !sr_io_is_open(app->io) || app->worker == NULL) {
+        return false;
+    }
+    codec = sigroam_codec(app);
+    if(codec == NULL || codec->build_stop_cmd == NULL) {
+        return false;
+    }
+    n = codec->build_stop_cmd(cmd, sizeof(cmd));
+    if(n == 0u) {
+        return false;
+    }
+    return sr_worker_send_cmd(app->worker, cmd);
+}
+
 void sigroam_scene_probe_on_enter(void* context) {
     SigRoamApp* app = context;
     SrHandshakeState st;
@@ -117,18 +162,10 @@ void sigroam_scene_probe_on_enter(void* context) {
     memset(&app->hs, 0, sizeof(app->hs));
     app->hs.timeout_ms = SR_HANDSHAKE_TIMEOUT_MS;
     app->probe_send_busy = false;
+    app->probe_stop_sent = false;
 
     if(app->io && sr_io_is_open(app->io) && app->worker) {
-        SrIoStats stats;
-
-        sr_io_get_stats(app->io, &stats);
-        app->hs.rx_bytes_at_send = stats.rx_bytes;
-        app->hs.rx_bytes_now = stats.rx_bytes;
-        app->hs.fw_rev_at_send = app->model.firmware_rev;
-        app->hs.fw_rev_now = app->model.firmware_rev;
-        app->hs.sent_tick_ms = furi_get_tick();
-        app->hs.sent = sr_worker_send_cmd(app->worker, "info\n");
-        app->probe_send_busy = !app->hs.sent;
+        app->probe_send_busy = !probe_queue_info(app);
     } else {
         /* Fill this in even when io is not open; otherwise the memset leaves 0 and, once tick
          * refreshes now, it would be misjudged as Ok. */
@@ -146,6 +183,7 @@ bool sigroam_scene_probe_on_event(void* context, SceneManagerEvent event) {
 
     if(event.type == SceneManagerEventTypeTick) {
         SrHandshakeState st;
+        bool retried;
 
         /* The tick handler is already inside app->mtx (sigroam.c takes the lock with zero wait
          * before dispatching). Do not take the lock again. */
@@ -158,7 +196,29 @@ bool sigroam_scene_probe_on_event(void* context, SceneManagerEvent event) {
         app->hs.fw_rev_now = app->model.firmware_rev;
         app->hs.fw_kind = app->model.firmware.kind;
         st = sr_handshake_eval(&app->hs, furi_get_tick());
-        if(st != app->hs_shown || app->model.firmware_rev != app->hs_rev_shown) {
+        retried = false;
+        if(sr_handshake_should_retry(&app->hs, furi_get_tick())) {
+            if(!probe_queue_info(app)) {
+                /* Consume the retry so a full worker slot cannot spin Tick. */
+                app->hs.sends = (uint8_t)SR_HANDSHAKE_MAX_SENDS;
+                app->probe_send_busy = true;
+            } else {
+                app->probe_send_busy = false;
+            }
+            st = sr_handshake_eval(&app->hs, furi_get_tick());
+            retried = true;
+        }
+        if(st == SrHandshakeOk && !app->probe_stop_sent &&
+           sr_dialect_probe_should_clear_show_info(&app->model.firmware)) {
+            uint32_t snap = app->model.wifi_stop_rev;
+
+            if(probe_queue_stopscan(app)) {
+                app->probe_stop_sent = true;
+                app->clear_stop_rev = snap;
+            }
+        }
+        /* Retry keeps Waiting, so state equality would skip "Retrying info". */
+        if(retried || st != app->hs_shown || app->model.firmware_rev != app->hs_rev_shown) {
             sigroam_scene_probe_draw(app, st);
         }
         return true;

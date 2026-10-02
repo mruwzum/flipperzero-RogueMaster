@@ -2,6 +2,15 @@
 #include "../../protopirate_app_i.h"
 #include "../../helpers/protopirate_models.h"
 
+static const ProtoPirateConfigSceneHostApi* g_config_scene_host_api = NULL;
+
+#define protopirate_preset_init(app, preset_name, frequency, preset_data, preset_data_size) \
+    g_config_scene_host_api->protopirate_preset_init(                                       \
+        app, preset_name, frequency, preset_data, preset_data_size)
+
+#define protopirate_refresh_protocol_registry(app, ensure_receiver_ready) \
+    g_config_scene_host_api->protopirate_refresh_protocol_registry(app, ensure_receiver_ready)
+
 #define ON_OFF_COUNT 2
 const char* const on_off_text[ON_OFF_COUNT] = {
     "OFF",
@@ -35,8 +44,11 @@ const char* const tx_power_text[TX_POWER_COUNT] = {
 
 bool protopirate_ensure_variable_item_list(ProtoPirateApp* app) {
     furi_check(app);
+
     if(app->variable_item_list) {
         view_dispatcher_remove_view(app->view_dispatcher, ProtoPirateViewVariableItemList);
+        variable_item_list_free(app->variable_item_list);
+        //Reassigned below... app->variable_item_list = NULL;
     }
 
     app->variable_item_list = variable_item_list_alloc();
@@ -177,15 +189,14 @@ static void protopirate_scene_receiver_config_set_model(VariableItem* item) {
 
     //set the Preset, Frequency and Hopper off or restore.
     if(model_index) {
-        variable_item_set_current_value_text(freq_menu, "Locked");
-        variable_item_set_current_value_text(hop_menu, "Locked");
-        app->txrx->hopper_state = ProtoPirateHopperStateOFF;
-        app->txrx->preset->frequency = app->selected_model->preset->frequency;
-
         //Save Original Preset.
-        if(old_model_index) {
-            app->selected_model->last_preset_index = subghz_setting_get_inx_preset_by_name(
-                app->setting, furi_string_get_cstr(app->txrx->preset->name));
+        if(!old_model_index) {
+            if(!strcmp(furi_string_get_cstr(app->txrx->preset->name), "Custom")) {
+                app->selected_model->last_preset_index = 0;
+            } else {
+                app->selected_model->last_preset_index = subghz_setting_get_inx_preset_by_name(
+                    app->setting, furi_string_get_cstr(app->txrx->preset->name));
+            }
         }
 
         protopirate_preset_init(
@@ -195,6 +206,10 @@ static void protopirate_scene_receiver_config_set_model(VariableItem* item) {
             app->selected_model->preset->data,
             app->selected_model->preset->data_size);
 
+        variable_item_set_current_value_text(freq_menu, "Locked");
+        variable_item_set_current_value_text(hop_menu, "Locked");
+        app->txrx->hopper_state = ProtoPirateHopperStateOFF;
+        //app->txrx->preset->frequency = app->selected_model->preset->frequency;
     } else {
         //Restore Original Preset.
         protopirate_scene_receiver_config_set_frequency(freq_menu);
@@ -470,14 +485,8 @@ static void plugin_on_enter(void* context) {
     view_dispatcher_switch_to_view(app->view_dispatcher, ProtoPirateViewVariableItemList);
 }
 
-static void plugin_on_exit(void* context) {
-    ProtoPirateApp* app = context;
-
-    //Reset the variable item list.
-    variable_item_list_set_selected_item(app->variable_item_list, 0);
-    variable_item_list_reset(app->variable_item_list);
-    variable_item_list_free(app->variable_item_list);
-    //app->variable_item_list = NULL;
+void config_plugin_set_host_api(const ProtoPirateConfigSceneHostApi* host_api) {
+    g_config_scene_host_api = host_api;
 }
 
 static const ProtoPirateConfigPlugin protopirate_config_plugin = {
@@ -485,7 +494,7 @@ static const ProtoPirateConfigPlugin protopirate_config_plugin = {
     .car_model_get_by_index = car_model_get_by_index,
     .car_model_get_count = car_model_get_count,
     .on_enter = plugin_on_enter,
-    .on_exit = plugin_on_exit,
+    .set_host_api = config_plugin_set_host_api,
 };
 
 static const FlipperAppPluginDescriptor protopirate_config_plugin_descriptor = {

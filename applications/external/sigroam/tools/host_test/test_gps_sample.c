@@ -743,8 +743,24 @@ int test_gps_sample_run(void) {
     fprintf(stderr, "sizeof(SrModel)=%zu\n", sizeof(SrModel));
     fprintf(stderr, "sizeof(SrDashModel)=%zu\n", sizeof(SrDashModel));
     fprintf(stderr, "sizeof(SrGpsSampleCtx)=%zu\n", sizeof(SrGpsSampleCtx));
-    CHECK(sizeof(SrModel) == 3328);
-    CHECK(sizeof(SrDashModel) == 644);
+    /* 2026-09-09 N6: +SrSessInfo(12) + sess_rev(4) = +16 → 3384.
+     * 2026-09-15 F2 rev1: +SrQualInfo(20) + qual_rev(4) = +24 → 3408.
+     * SrDashModel +qual(20)+qual_rev(4) = 672+24 → 696.
+     * 2026-09-15 F2 rev2: SrModel +qual_tick_ms(4) lands on 4 B of padding that
+     * was already sitting before char last_unknown[512] (size_t last_unknown_len
+     * right after it needs 8-B alignment) -- confirmed by this file's own
+     * fprintf(stderr, "sizeof(SrModel)=...") above, unchanged at 3408.
+     * SrDashModel +qual_tick_ms(4)+sess_ms(4) = 696+8 → 704 (both trail the
+     * struct, no absorbable padding there).
+     * 2026-09-16 T6.5 half B: SrModel +SrRadioInfo(2)+pad(2)+radio_rev(4) = +8 → 3416.
+     * 2026-09-18 SHOW_INFO clear: +wifi_stop_rev(4)+pad(4) = +8 → 3424.
+     * SrDashModel same +8 → 712. SrEvent stays 240 (radio arm is 2 B).
+     * 2026-09-20 board_sealing bool sits in the 3-byte pad after scan_ui
+     * (before ap_wifi); sizeof stays 712.
+     * 2026-09-24 band counts + last session + pending popup fields:
+     * SrModel 3536 → 3584, SrDashModel 712 → 736. */
+    CHECK(sizeof(SrModel) == 3584);
+    CHECK(sizeof(SrDashModel) == 736);
     CHECK(sizeof(SrDashModel) <= 768);
     CHECK(sizeof(SrGpsSampleCtx) == 20);
 

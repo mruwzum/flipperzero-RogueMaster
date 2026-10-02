@@ -1,4 +1,5 @@
 #include "specter_log.h"
+#include "log_wrap.h"
 
 #include <datetime/datetime.h>
 #include <furi_hal_rtc.h>
@@ -86,9 +87,20 @@ bool specter_log_append(const char* type, const char* fmt, ...) {
     char stamp[STAMP_MAX];
     stamp_now(stamp, sizeof(stamp));
 
-    /* Grouped for the on-device viewer: timestamp, then an indented line. */
-    char txt[STAMP_MAX + DETAIL_MAX + 32u];
-    snprintf(txt, sizeof(txt), "%s\n  %-6s %s\n", stamp, type, detail);
+    /* Grouped for the on-device viewer: timestamp, then the detail on one or
+     * more indented lines. It used to be a single indented line on the
+     * assumption the TextBox would wrap it sensibly; it wraps by character, so
+     * a Watch contact came out with "field" split across a line break and the
+     * remainder un-indented. See log_wrap.h. */
+    char txt[STAMP_MAX + DETAIL_MAX + 64u];
+    int head = snprintf(txt, sizeof(txt), "%s\n", stamp);
+    if(head < 0 || (size_t)head >= sizeof(txt)) return false;
+    if(specter_log_wrap(txt + head, sizeof(txt) - (size_t)head, type, detail) == 0u) {
+        /* Should not happen - the buffer is sized for the worst case - but a
+         * finding is worth more than its formatting, so fall back to the old
+         * single long line rather than dropping the entry. */
+        snprintf(txt + head, sizeof(txt) - (size_t)head, "  %-6s %s\n", type, detail);
+    }
 
     /* One flat row for the spreadsheet. */
     char csv[STAMP_MAX + DETAIL_MAX + 32u];
@@ -131,11 +143,22 @@ bool specter_log_read_tail(FuriString* out) {
             size_t got = storage_file_read(file, buf, want);
             buf[got] = '\0';
 
-            /* If we cut into the middle of a line, drop the fragment. */
+            /* If we cut into the middle of the file, drop the fragment - and
+             * keep dropping until we are at the start of a whole ENTRY, not just
+             * the start of a line. Detail lines are indented, so landing on one
+             * means the timestamp it belongs to was cut off. */
             const char* text = buf;
             if(start > 0) {
                 const char* nl = strchr(buf, '\n');
-                if(nl) text = nl + 1;
+                text = nl ? nl + 1 : buf + got;
+                while(*text == ' ') {
+                    const char* next = strchr(text, '\n');
+                    if(!next) {
+                        text += strlen(text);
+                        break;
+                    }
+                    text = next + 1;
+                }
             }
 
             if(*text) {

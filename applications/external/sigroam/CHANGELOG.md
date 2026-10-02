@@ -5,6 +5,102 @@ All notable changes to SigRoam are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Plugging in or unplugging the Flipper's USB cable during a survey no longer leaves Dash counting while the board has stopped scanning. With SigRoam firmware, Dash now checks the board's own state. If the board has stopped, Dash starts a new survey within about 15 seconds. If the board is still saving or uploading, Dash shows `Resyncing...` and waits for it to finish. After 3 minutes without success, Dash shows `Scan lost, press OK`. The survey continues in a new file, and Dash counts restart from 0.
+- Dash no longer sends a stop when USB is unplugged while the SigRoam board is still scanning.
+
+## [0.6] — 2026-09-24
+
+For Scout Lite running SigRoam 0.6.
+
+### Added
+
+- Dash shows 2.4 GHz and 5 GHz counts separately.
+- A new network plays one short sound, at most once every 2 seconds, and does not vibrate. Settings: New net tick.
+- After you stop, Dash keeps a one-line summary of that survey.
+- If sealed surveys are still waiting, Dash asks once whether to upload. It tells you when the WiGLE key or home Wi-Fi is not set.
+- Upload shows Key and Home.
+- Rank shows your WiGLE account rank, not the count from this drive.
+- Unleashed build: `sigroam-0.6-unleashed.fap`.
+
+### Changed
+
+- Probe and About show v0.6.
+- Upload distinguishes a missing WiGLE reply, a rejected key, and WiGLE busy.
+
+## [0.5] — 2026-09-23
+
+BLE observation and on-board WiGLE upload for Scout Lite. Not product v1.0.
+
+The scanner app is SHA-256 `13e13033ad2f124b6edb4c599b99e10fb576872964169ea627fb8b320ea54b7c`, 1638160 bytes, written at `0x20000`. Bootloader, partition table, and otadata stay the v0.4 bytes. A sealed survey on that app wrote 66 BLE rows (`obs_ble=5784`).
+
+### Added
+
+- The scanner uploads a sealed WiGLE CSV. Success is an official `transId` stored next to that file.
+- HTTP 429 stops the round and records `reason=HTTP_429`. It does not mark the round done. That status is WiGLE's daily file limit.
+- Upload shows `WiGLE busy` / `try later` when the diag state is 5, there is no id, and the reason is `HTTP_429`. A real id still shows `Uploaded`. Any other state 5 stays `Sending`.
+- This scanner image observes BLE. Dash shows the live BLE count. There is no separate BLE switch.
+
+### Changed
+
+- Probe shows SigRoam / v0.5 / Scout Lite. It does not show the UART `Version:` line.
+
+## [0.4] — 2026-09-17
+
+Scout Lite identity on the Sess tab, a capture-quality headline, BLE-off on
+Dash, a Dash/GPS layout pass, About lockup A2, and a second Unleashed build.
+
+### Added
+
+- **The Sess tab names a Scout Lite board SigRoam.** The eight-byte wire token
+  is still `Firmware: Marauder` and is not shown on this tab. The status line
+  is Running or Sealed, the duration, and the radio permission (`W+B` / `W` /
+  `B` / `--`). A generic Marauder board still shows the wire firmware name.
+- **Dashboard capture-quality headline.** When the scanner sends `Qual:`, Dash
+  shows fix%, drop and net, refreshed on the shared 5-second tick. A stale
+  headline degrades instead of looking current.
+- **Dash shows BLE=OFF** when the scanner reports `Radio: ble=0`.
+- **A second `.fap` for Unleashed.** Official 1.4.3 and Momentum `mntm-012`
+  both report API 87.1, so one Official-SDK build covers both. Unleashed
+  `unlshd-093` (2026-09-12) is API 88.9; the loader compares the API major
+  exactly, so that firmware needs its own file. Tapping Continue on an API
+  mismatch is not support.
+
+### Changed
+
+- The app title is **SigRoam Wardriving**. Probe names SigRoam firmware when
+  it is talking to this scanner. The handshake token on the wire is unchanged.
+- **About lockup A2:** `SigRoam Wardriving v0.4` on one line (normal spacing),
+  maker line `by PINGEQUA Lab`, QR dropped to the second row. On-device
+  version matches `fap_version` 0.4 (it still said 0.3). Receive-only, No
+  attack, Marauder compatible, and the QR short link are unchanged.
+- The unique-BSSID count is the big number at the top of Dash again.
+- The status line sits on the bottom: OK, fix percent, drop, and SAT. Bytes
+  received (`rx=`) no longer show on the normal Dash while a SigRoam scan is
+  running.
+- The GPS tab dropped the `(live)` tag. Accuracy is labelled `Acc:~` because
+  it is an estimate.
+- SAT on Dash and GPS comes from the survey snapshot or a fresh Qual reading,
+  not a separate `gpsdata` poll during a scan.
+- Probe sends `info` a second time if the scanner does not answer in 1.5 s.
+- While a stock Marauder scan is running with no AP or BLE rows yet, Dash
+  shows `Waiting for first AP` instead of a zeroed count line. Stream stays
+  `No APs yet`.
+- On the GPS tab, an empty scan log is only `No GPS data yet`. A scan row
+  with no datetime shows `POI: no fix in log`.
+- Dash does not send `info` to a stock Marauder. That command is not
+  read-only there: it leaves `SHOW_INFO` and the next wardrive never starts.
+- After Probe recognises a generic Marauder, the app sends `stopscan` once
+  so Dash can start a scan. SigRoam firmware is unchanged.
+- Empty Version is not treated as a generic Marauder. Dash holds START
+  until Version arrives; 1500 ms is retry spacing, not the end of the hold.
+- Dash shows `No SD` / `Saving...` and does not cover those with the ident
+  overlay.
+- Probe retries `info` until Version arrives or the send cap.
+
 ## [0.3] — 2026-09-04
 
 Scan control, where the GPS reading comes from, the notification switches, and
