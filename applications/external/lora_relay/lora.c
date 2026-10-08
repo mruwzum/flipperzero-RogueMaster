@@ -25,7 +25,10 @@ https://github.dev/thekakester/Arduino-LoRa-Sx1262
 
 static uint32_t timeout = 1000;
 // static uint32_t timeout = 100;
-static FuriHalSpiBusHandle* spi = &furi_hal_spi_bus_handle_external;
+// The firmware's external SPI handle is const now, so the app works on a mutable
+// copy (CS moved to PC0 in lora_relay_app) instead of patching the global one.
+FuriHalSpiBusHandle lora_spi_handle;
+static const FuriHalSpiBusHandle* spi = &lora_spi_handle;
 
 const GpioPin* const pin_beacon = &gpio_swclk;
 const GpioPin* const pin_nss1 = &gpio_ext_pc0;

@@ -21,7 +21,8 @@
 
 #define LORA_APP_FOLDER "apps_data/lora"
 
-static FuriHalSpiBusHandle* spi = &furi_hal_spi_bus_handle_external;
+extern FuriHalSpiBusHandle lora_spi_handle;
+static const FuriHalSpiBusHandle* spi = &lora_spi_handle;
 
 const GpioPin* const pin_led = &gpio_swclk;
 const GpioPin* const pin_back = &gpio_button_back;
@@ -331,7 +332,8 @@ int32_t lora_relay_run(LoRaRelay* instance) {
 int32_t lora_relay_app(void* p) {
     UNUSED(p);
 
-    spi->cs = &gpio_ext_pc0;
+    lora_spi_handle = furi_hal_spi_bus_handle_external;
+    lora_spi_handle.cs = &gpio_ext_pc0;
 
     furi_hal_spi_bus_handle_init(spi);
 
@@ -346,7 +348,6 @@ int32_t lora_relay_app(void* p) {
     lora_relay_free(instance);
 
     furi_hal_spi_bus_handle_deinit(spi);
-    spi->cs = &gpio_ext_pa4;
 
     // Typically when a pin is no longer in use, it is set to analog mode.
     furi_hal_gpio_init_simple(pin_led, GpioModeAnalog);

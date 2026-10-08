@@ -291,7 +291,9 @@ class AppBuilder:
                     )
             self.app_env.Depends(
                 app_artifacts.compact,
-                (*asset_files, self.app_env.Value(sorted(asset_entries))),
+                # Keep the dir node: it is the target of fap_extbuild generators
+                # (e.g. air_level sprites), so it must be built before packaging.
+                (*asset_files, assets_dir, self.app_env.Value(sorted(asset_entries))),
             )
 
         # Always run the validator for the app's binary when building the app
