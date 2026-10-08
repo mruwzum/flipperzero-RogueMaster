@@ -70,6 +70,7 @@ typedef enum {
     LoaderMessageTypeShowSettings,
     LoaderMessageTypeSetMenuStyle,
     LoaderMessageTypeLoadingCheck,
+    LoaderMessageTypeShowGamesMenu,
 } LoaderMessageType;
 
 typedef struct {
@@ -92,6 +93,7 @@ typedef enum {
     LoaderStatusErrorOutdatedApp,
     LoaderStatusErrorOutOfMemory,
     LoaderStatusErrorOutdatedFirmware,
+    LoaderStatusErrorMissingRuntime,
 } LoaderStatusError;
 
 typedef struct {

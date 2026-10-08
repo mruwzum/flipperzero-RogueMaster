@@ -15,28 +15,24 @@
 #define UNLOCK_CNT               3
 #define SUBGHZ_RAW_THRESHOLD_MIN -90.0f
 
-struct ProtoPirateReceiver {
-    View* view;
-    ProtoPirateReceiverCallback callback;
-    void* context;
-};
-
 typedef struct {
-    ProtoPirateHistory* history;
-    uint8_t list_offset;
-    uint8_t history_item;
     float rssi;
-    bool auto_save;
+    IconAnimation* icon_int_ant;
+    IconAnimation* icon_ext_ant;
+    ProtoPirateHistory* history;
     char* frequency_str;
     char* preset_str;
     char* history_stat_str;
     FuriString* draw_scratch;
-    bool external_radio;
     ProtoPirateLock lock;
+    uint8_t list_offset;
+    uint8_t history_item;
     uint8_t lock_count;
     uint8_t animation_frame;
     uint8_t sub_decode_progress;
     bool dolphin_view;
+    bool auto_save;
+    bool external_radio;
     bool sub_decode_mode;
 } ProtoPirateReceiverModel;
 
@@ -65,7 +61,6 @@ static const RadarPoint radar_points[] = {
 };
 
 static size_t protopirate_view_receiver_item_count(ProtoPirateReceiverModel* model) {
-    furi_check(model);
     return model->history ? protopirate_history_get_item(model->history) : 0U;
 }
 
@@ -82,7 +77,6 @@ static void protopirate_view_radar_point(
 }
 
 static void protopirate_view_rssi_draw(Canvas* canvas, ProtoPirateReceiverModel* model) {
-    furi_check(model);
     uint8_t u_rssi = 0;
 
     if(model->rssi >= SUBGHZ_RAW_THRESHOLD_MIN) {
@@ -108,7 +102,6 @@ static void protopirate_view_rssi_draw(Canvas* canvas, ProtoPirateReceiverModel*
 void protopirate_view_receiver_set_sub_decode_mode(
     ProtoPirateReceiver* receiver,
     bool sub_decode_mode) {
-    furi_check(receiver);
     with_view_model(
         receiver->view,
         ProtoPirateReceiverModel * model,
@@ -124,7 +117,6 @@ void protopirate_view_receiver_set_sub_decode_mode(
 void protopirate_view_receiver_set_sub_decode_progress(
     ProtoPirateReceiver* receiver,
     uint8_t progress) {
-    furi_check(receiver);
     if(progress > 100) progress = 100;
     bool changed = false;
     with_view_model(
@@ -138,19 +130,16 @@ void protopirate_view_receiver_set_sub_decode_progress(
 }
 
 void protopirate_view_receiver_set_rssi(ProtoPirateReceiver* receiver, float rssi) {
-    furi_check(receiver);
     with_view_model(
         receiver->view, ProtoPirateReceiverModel * model, { model->rssi = rssi; }, true);
 }
 
 void protopirate_view_receiver_set_lock(ProtoPirateReceiver* receiver, ProtoPirateLock lock) {
-    furi_check(receiver);
     with_view_model(
         receiver->view, ProtoPirateReceiverModel * model, { model->lock = lock; }, true);
 }
 
 void protopirate_view_receiver_set_autosave(ProtoPirateReceiver* receiver, bool auto_save) {
-    furi_check(receiver);
     with_view_model(
         receiver->view, ProtoPirateReceiverModel * model, { model->auto_save = auto_save; }, true);
 }
@@ -159,13 +148,11 @@ void protopirate_view_receiver_set_callback(
     ProtoPirateReceiver* receiver,
     ProtoPirateReceiverCallback callback,
     void* context) {
-    furi_check(receiver);
     receiver->callback = callback;
     receiver->context = context;
 }
 
 static void protopirate_view_receiver_update_offset(ProtoPirateReceiver* receiver) {
-    furi_check(receiver);
     with_view_model(
         receiver->view,
         ProtoPirateReceiverModel * model,
@@ -201,7 +188,6 @@ void protopirate_view_receiver_add_data_statusbar(
     const char* history_stat_str,
     size_t history_stat_size,
     bool external_radio) {
-    furi_check(receiver);
     bool changed = false;
     with_view_model(
         receiver->view,
@@ -427,7 +413,6 @@ void protopirate_view_receiver_draw(Canvas* canvas, ProtoPirateReceiverModel* mo
 }
 
 bool protopirate_view_receiver_input(InputEvent* event, void* context) {
-    furi_check(context);
     ProtoPirateReceiver* receiver = context;
 
     bool consumed = false;
@@ -571,12 +556,10 @@ bool protopirate_view_receiver_input(InputEvent* event, void* context) {
 }
 
 void protopirate_view_receiver_enter(void* context) {
-    furi_check(context);
     UNUSED(context);
 }
 
 void protopirate_view_receiver_exit(void* context) {
-    furi_check(context);
     UNUSED(context);
 }
 
@@ -600,7 +583,6 @@ ProtoPirateReceiver* protopirate_view_receiver_alloc(bool auto_save) {
             model->preset_str = malloc(8);
             model->history_stat_str = malloc(16);
             model->draw_scratch = furi_string_alloc();
-            furi_check(model->draw_scratch);
             model->list_offset = 0;
             model->history_item = 0;
             model->rssi = -127.0f;
@@ -619,8 +601,6 @@ ProtoPirateReceiver* protopirate_view_receiver_alloc(bool auto_save) {
 }
 
 void protopirate_view_receiver_free(ProtoPirateReceiver* receiver) {
-    furi_check(receiver);
-
     with_view_model(
         receiver->view,
         ProtoPirateReceiverModel * model,
@@ -637,7 +617,6 @@ void protopirate_view_receiver_free(ProtoPirateReceiver* receiver) {
 }
 
 void protopirate_view_receiver_reset_menu(ProtoPirateReceiver* receiver) {
-    furi_check(receiver);
     with_view_model(
         receiver->view,
         ProtoPirateReceiverModel * model,
@@ -652,9 +631,6 @@ void protopirate_view_receiver_reset_menu(ProtoPirateReceiver* receiver) {
 void protopirate_view_receiver_sync_menu_from_history(
     ProtoPirateReceiver* receiver,
     ProtoPirateHistory* history) {
-    furi_check(receiver);
-    furi_check(history);
-
     with_view_model(
         receiver->view,
         ProtoPirateReceiverModel * model,
@@ -678,7 +654,6 @@ void protopirate_view_receiver_sync_menu_from_history(
 }
 
 void protopirate_view_receiver_pop_first_menu_item(ProtoPirateReceiver* receiver) {
-    furi_check(receiver);
     with_view_model(
         receiver->view,
         ProtoPirateReceiverModel * model,
@@ -698,8 +673,6 @@ void protopirate_view_receiver_pop_first_menu_item(ProtoPirateReceiver* receiver
 }
 
 void protopirate_view_receiver_delete_item(ProtoPirateReceiver* receiver, uint16_t idx) {
-    furi_check(receiver);
-
     with_view_model(
         receiver->view,
         ProtoPirateReceiverModel * model,
@@ -731,19 +704,15 @@ void protopirate_view_receiver_append_menu_row_from_history(
     ProtoPirateReceiver* receiver,
     ProtoPirateHistory* history,
     uint16_t idx) {
-    furi_check(receiver);
-    furi_check(history);
     UNUSED(idx);
     protopirate_view_receiver_sync_menu_from_history(receiver, history);
 }
 
 View* protopirate_view_receiver_get_view(ProtoPirateReceiver* receiver) {
-    furi_check(receiver);
     return receiver->view;
 }
 
 uint16_t protopirate_view_receiver_get_idx_menu(ProtoPirateReceiver* receiver) {
-    furi_check(receiver);
     uint16_t idx = 0;
     with_view_model(
         receiver->view, ProtoPirateReceiverModel * model, { idx = model->history_item; }, false);
@@ -751,7 +720,6 @@ uint16_t protopirate_view_receiver_get_idx_menu(ProtoPirateReceiver* receiver) {
 }
 
 void protopirate_view_receiver_set_idx_menu(ProtoPirateReceiver* receiver, uint16_t idx) {
-    furi_check(receiver);
     with_view_model(
         receiver->view,
         ProtoPirateReceiverModel * model,

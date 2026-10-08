@@ -14,6 +14,10 @@
 #include <cfw/asset_packs.h>
 #include <cfw/settings.h>
 
+#ifdef APP_ARCHIVE
+#include <archive/archive_launcher.h>
+#endif
+
 #define TAG "Loader"
 
 #define LOADER_MAGIC_THREAD_VALUE 0xDEADBEEF
@@ -76,6 +80,8 @@ static const LoaderError err_invalid_manifest =
     {"Invalid Manifest", "Update firmware or app", "err_03", &I_err_03};
 static const LoaderError err_missing_imports =
     {"Missing Imports", "Update app or firmware", "err_04", &I_err_04};
+static const LoaderError err_missing_runtime =
+    {"mJS Unavailable", "Check SD resources\nand free memory\n(mjs_engine.fal)", NULL, &I_err_04};
 static const LoaderError err_hw_target_mismatch =
     {"HW Target\nMismatch", "App not supported", "err_05", &I_err_05};
 static const LoaderError err_outdated_app = {"Outdated App", "Update the app", "err_06", &I_err_06};
@@ -84,8 +90,10 @@ static const LoaderError err_outdated_firmware =
 
 static void loader_dialog_prepare_and_show(DialogsApp* dialogs, const LoaderError* err) {
     FuriString* header = furi_string_alloc_printf("Error: %s", err->error);
-    FuriString* text =
-        furi_string_alloc_printf("%s\nLearn more:\nr.flipper.net/%s", err->description, err->url);
+    FuriString* text = err->url ?
+                           furi_string_alloc_printf(
+                               "%s\nLearn more:\nr.flipper.net/%s", err->description, err->url) :
+                           furi_string_alloc_set(err->description);
     DialogMessage* message = dialog_message_alloc();
 
     dialog_message_set_header(message, furi_string_get_cstr(header), 64, 0, AlignCenter, AlignTop);
@@ -138,6 +146,9 @@ static void loader_show_gui_error(
             break;
         case LoaderStatusErrorMissingImports:
             loader_dialog_prepare_and_show(dialogs, &err_missing_imports);
+            break;
+        case LoaderStatusErrorMissingRuntime:
+            loader_dialog_prepare_and_show(dialogs, &err_missing_runtime);
             break;
         case LoaderStatusErrorHWMismatch:
             loader_dialog_prepare_and_show(dialogs, &err_hw_target_mismatch);
@@ -267,6 +278,12 @@ void loader_show_settings(Loader* loader) {
     LoaderMessage message;
     message.type = LoaderMessageTypeShowSettings;
 
+    furi_message_queue_put(loader->queue, &message, FuriWaitForever);
+}
+
+void loader_show_games_menu(Loader* loader) {
+    furi_check(loader);
+    LoaderMessage message = {.type = LoaderMessageTypeShowGamesMenu};
     furi_message_queue_put(loader->queue, &message, FuriWaitForever);
 }
 
@@ -586,6 +603,8 @@ static LoaderStatusError
     switch(status) {
     case FlipperApplicationLoadStatusMissingImports:
         return LoaderStatusErrorMissingImports;
+    case FlipperApplicationLoadStatusMissingRuntime:
+        return LoaderStatusErrorMissingRuntime;
     default:
         return LoaderStatusErrorUnknown;
     }
@@ -737,10 +756,10 @@ static LoaderMessageLoaderStatusResult loader_start_external_app(
 
 // process messages
 
-static void loader_do_menu_show(Loader* loader, bool settings_only) {
+static void loader_do_menu_show(Loader* loader, bool settings_only, bool games_only) {
     if(!loader->loader_menu) {
         loader->loader_menu =
-            loader_menu_alloc(loader_menu_closed_callback, loader, settings_only);
+            loader_menu_alloc(loader_menu_closed_callback, loader, settings_only, games_only);
     }
 }
 
@@ -960,6 +979,9 @@ static void loader_do_unlock(Loader* loader) {
 
 static void loader_do_emit_queue_empty_event(Loader* loader) {
     if(loader_do_is_locked(loader)) return;
+#ifdef APP_ARCHIVE
+    archive_handoff_cleanup();
+#endif
     FURI_LOG_I(TAG, "Launch queue empty");
     LoaderEvent event;
     event.type = LoaderEventTypeNoMoreAppsInQueue;
@@ -1120,10 +1142,13 @@ int32_t loader_srv(void* p) {
                 break;
             }
             case LoaderMessageTypeShowMenu:
-                loader_do_menu_show(loader, false);
+                loader_do_menu_show(loader, false, false);
                 break;
             case LoaderMessageTypeShowSettings:
-                loader_do_menu_show(loader, true);
+                loader_do_menu_show(loader, true, false);
+                break;
+            case LoaderMessageTypeShowGamesMenu:
+                loader_do_menu_show(loader, false, true);
                 break;
             case LoaderMessageTypeMenuClosed:
                 loader_do_menu_closed(loader);

@@ -7,9 +7,15 @@
 #define TAG "PPSceneStart"
 
 typedef enum {
+#ifdef ENABLE_WELCOME_SCREEN
+    SubmenuIndexProtoPirateWelcome,
+#endif
     SubmenuIndexProtoPirateReceiver,
     SubmenuIndexProtoPirateSaved,
     SubmenuIndexProtoPirateReceiverConfig,
+#ifdef ENABLE_REMOTE_ANALYZER
+    SubmenuIndexProtoPirateRemoteAnalyzer,
+#endif
 #ifdef ENABLE_SUB_DECODE_SCENE
     SubmenuIndexProtoPirateSubDecode,
 #endif
@@ -20,16 +26,23 @@ typedef enum {
 } SubmenuIndex;
 
 static void protopirate_scene_start_submenu_callback(void* context, uint32_t index) {
-    furi_check(context);
     ProtoPirateApp* app = context;
     view_dispatcher_send_custom_event(app->view_dispatcher, index);
 }
 
 void protopirate_scene_start_on_enter(void* context) {
-    furi_check(context);
     ProtoPirateApp* app = context;
 
     protopirate_release_shared_radio_state(app);
+
+#ifdef ENABLE_WELCOME_SCREEN
+    submenu_add_item(
+        app->submenu,
+        "Welcome",
+        SubmenuIndexProtoPirateWelcome,
+        protopirate_scene_start_submenu_callback,
+        app);
+#endif
 
     submenu_add_item(
         app->submenu,
@@ -51,6 +64,15 @@ void protopirate_scene_start_on_enter(void* context) {
         SubmenuIndexProtoPirateReceiverConfig,
         protopirate_scene_start_submenu_callback,
         app);
+#ifdef ENABLE_REMOTE_ANALYZER
+    submenu_add_item(
+        app->submenu,
+        "Remote Analyzer",
+        SubmenuIndexProtoPirateRemoteAnalyzer,
+        protopirate_scene_start_submenu_callback,
+        app);
+#endif
+
 #ifdef ENABLE_SUB_DECODE_SCENE
     submenu_add_item(
         app->submenu,
@@ -86,7 +108,6 @@ void protopirate_scene_start_on_enter(void* context) {
 }
 
 bool protopirate_scene_start_on_event(void* context, SceneManagerEvent event) {
-    furi_check(context);
     ProtoPirateApp* app = context;
     bool consumed = false;
 
@@ -118,6 +139,18 @@ bool protopirate_scene_start_on_event(void* context, SceneManagerEvent event) {
             //Hide the lock keyboard option.
             scene_manager_set_scene_state(app->scene_manager, ProtoPirateSceneReceiverConfig, 0);
             scene_manager_next_scene(app->scene_manager, ProtoPirateSceneTimingTuner);
+            consumed = true;
+        }
+#endif
+#ifdef ENABLE_WELCOME_SCREEN
+        else if(event.event == SubmenuIndexProtoPirateWelcome) {
+            scene_manager_next_scene(app->scene_manager, ProtoPirateSceneWelcome);
+            consumed = true;
+        }
+#endif
+#ifdef ENABLE_REMOTE_ANALYZER
+        else if(event.event == SubmenuIndexProtoPirateRemoteAnalyzer) {
+            scene_manager_next_scene(app->scene_manager, ProtoPirateSceneRemoteAnalyzer);
             consumed = true;
         }
 #endif
