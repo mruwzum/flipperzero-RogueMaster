@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include "fsd_handler.h"  // for CanFrame
 
@@ -13,9 +14,22 @@ static inline const char *can_bus_name(CanBusId bus) {
     return bus == CAN_BUS_SECONDARY ? "can1" : "can0";
 }
 
+/** The MCP2515 receive task (Mcp2515Driver::setRxTask) as it stands. */
+struct CanRxTaskInfo {
+    bool     wanted;      // the setting
+    bool     running;     // the task is up and receive() reads its queue
+    bool     int_pin;     // woken by the chip's INT pin, else a 1 ms poll
+    uint32_t queue_len;   // frames the queue holds
+    uint32_t high_water;  // most frames waiting at once
+    uint32_t dropped;     // frames lost on a full queue
+    uint32_t overflows;   // RXnOVR events seen by the task, one or more frames each
+    uint32_t stack_free;  // the task's lowest free stack, bytes (0 when not running)
+};
+
 // ── Abstract CAN driver ───────────────────────────────────────────────────────
-// Implemented by TwaiDriver (CAN_DRIVER_TWAI) and Mcp2515Driver (CAN_DRIVER_MCP2515).
-// Compile-time selection via platformio.ini build_flags.
+// Implemented by TwaiDriver (CAN_DRIVER_TWAI), Mcp2515Driver (CAN_DRIVER_MCP2515)
+// and Mcp2518FdDriver (T-2CAN FD can1). Compile-time selection via platformio.ini
+// build_flags.
 
 class CanDriver {
 public:
@@ -42,22 +56,35 @@ public:
     virtual uint32_t rxCount() = 0;
 
     /** Frames the driver dropped because their DLC was above 8 (legal on the
-     *  wire, but CanFrame holds 8 bytes). Extended / remote frames are passed
-     *  up with frame.ext / frame.req set; process_frame() filters those. */
+     *  wire, but CanFrame holds 8 bytes), and on the MCP2518FD any CAN FD
+     *  frame. Extended / remote frames are passed up with frame.ext /
+     *  frame.req set; process_frame() filters those. */
     virtual uint32_t rxRejectedCount() { return 0; }
 
     /** Cumulative count of frames the CONTROLLER dropped because its RX queue
      *  overflowed (silent decimation of a busy bus). TWAI: twai_status_info_t
-     *  .rx_missed_count. Drivers without the metric return 0. */
+     *  .rx_missed_count, carried across the driver reinstalls of a mode switch
+     *  or a capture filter change, as are bus errors and failed sends.
+     *  MCP2518FD: RX FIFO overflow events, each one or more frames. MCP2515:
+     *  only while its receive task runs, frames lost on the task's full queue
+     *  plus RX overflow events. Drivers without the metric return 0. */
     virtual uint32_t rxMissedCount() { return 0; }
 
     /** Cumulative bus errors (bit/stuff/form/CRC/ACK) the controller saw on
-     *  the wire. TWAI: .bus_error_count. Drivers without the metric return 0. */
+     *  the wire. TWAI: .bus_error_count. MCP2518FD: the CiBDIAG0 counters.
+     *  Drivers without the metric return 0. */
     virtual uint32_t busErrorCount() { return 0; }
 
     /** Cumulative frames that failed to transmit. TWAI: .tx_failed_count;
      *  MCP2515: sendMessage() failures. Drivers without the metric return 0. */
     virtual uint32_t txFailedCount() { return 0; }
+
+    /** Mode, controller state and error counters in the driver's own terms,
+     *  for the serial `canstat` command. TWAI and MCP2515 count different
+     *  things, so errorCount() alone reads the same on both while meaning
+     *  different things; this spells out what each one has. Reads registers
+     *  (over SPI on the MCP2515): not for the receive path. */
+    virtual void describeState(char *out, size_t n) { if (n) out[0] = '\0'; }
 
     /** Switch between listen-only and normal TX mode at runtime.
      *  Implementations must reinitialise the hardware as needed. */
@@ -102,6 +129,14 @@ public:
 
     /** Stop TX/ACK and release the bus before a reboot. Default no-op. */
     virtual void shutdown() {}
+
+    /** MCP2515 only: read the chip from a FreeRTOS task into a queue instead
+     *  of from the loop (opt-in). Takes effect at once when the controller is
+     *  up, else at the next successful begin(). Default no-op. */
+    virtual void setRxTask(bool on) { (void)on; }
+
+    /** Fills @p out and returns true on a driver that has the receive task. */
+    virtual bool rxTaskInfo(CanRxTaskInfo &out) { (void)out; return false; }
 
     virtual ~CanDriver() = default;
 };

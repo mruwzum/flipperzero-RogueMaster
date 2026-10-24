@@ -50,11 +50,25 @@ Most CAN protocol handling from hypery11's Flipper Zero implementation (`fsd_han
 - **Tesla dark theme UI** — mobile-first responsive design (optimized for phone in portrait)
   - Dark background (#0a0a1a) with accent gradients, inspired by Tesla's in-car UI
   - All HTML/CSS/JS embedded in firmware (no external CDN dependencies)
-- **Real-time WebSocket push** — 1 Hz state updates via WebSocket on port 81
+- **Real-time WebSocket push** — 1 Hz state updates via WebSocket on port 81; where the WebSocket never delivers (the iOS / macOS captive-portal sheet) the page polls `GET /api/status` and sends commands with `POST /api/cmd` instead
 - **FSD Status Panel** — FSD active/waiting, Listen-Only/Active mode, HW version, NAG Killer state, HW3 speed read-out (car → sent profile and FSD offset, follow distance)
 - **Battery SOC Ring** — animated circular progress bar with color coding (green >60%, yellow >30%, red ≤30%)
 - **BMS Live Data UI hooks** — fields exist in UI/API; Model 3/Y frames only (wrong on S/X), not yet confirmed on the ESP32
-- **CAN Bus Stats** — RX frame count, TX modified count, CAN errors, frames/second
+- **Performance Panel (read-only, opt-in)** — a collapsible card (off by default, shown state saved per browser) with live metrics derived only from frames already received — it transmits nothing and adds no TX path:
+  - Acceleration timers 0-50 km/h, 0-60 mph, 0-100 km/h and a braking 100-0 km/h, with a best time kept per session (auto-arm leaving a standstill, lock at the target, reset at the next standstill), from vehicle speed `0x257`
+  - Estimated longitudinal G from dv/dt of vehicle speed (labelled "est." — no IMU), with a rolling accel/brake peak
+  - Wheel slip % (rear avg − front avg) from the four wheel speeds `0x175` (Party CAN)
+  - Pack temperature with normal / warm / hot banding plus cold and hot advisory lines, and instantaneous power (kW) — from the BMS frames (needs a Vehicle-CAN tap)
+  - Speed and est. G work on any tap carrying `0x257`; wheel slip needs Party CAN (`0x175`); temperature and power need the BMS frames on a Vehicle-CAN tap. Motor / inverter / stator temperature is **not** shown — it is not broadcast on CAN in a verified DBC (the drive-inverter temperature frames are on the car's internal Ethernet)
+- **Tyre Pressure (read-only)** — the four pressures, in bar or psi, from `0x219` VCSEC_TPMSData, decoded on whichever bus carries it, in every mode, Listen-Only included; nothing is ever sent because of it ([#237](https://github.com/hypery11/flipper-tesla-fsd/issues/237), idea from [ukinora's fork](https://github.com/ukinora/flipper-tesla-fsd)):
+  - Only on a tap that carries `0x219`. It was seen on the Vehicle CAN pair of a 2024 Model Y; Party CAN most likely does not carry it. The card stays hidden until the frame shows up, shows `--` until it holds a value, says how long ago the last reading arrived, and marks the values **Stale** when no reading has arrived for 30 s (car asleep, or a single-ID capture that leaves `0x219` out)
+  - Two forms of the frame are known. Newer cars send 7 bytes in six kinds: kind 5 carries all four pressures (0.025 bar each) and kind 4 the car's target pair (2.90 bar / 42 psi on a Model Y). Their four per-sensor kinds read `80 FF FF FF` when parked, and the byte the DBC calls pressure stayed at `0x80` through a drive, so they are not decoded. The 5-byte form from the public Model 3 DBC (one sensor per frame, with temperature and the wheel it sits on) is decoded as the DBC describes it, but no capture of it exists yet
+  - **Wheel order.** In the 7-byte form, bytes 2..5 of kind 5 are FL, FR, RL, RR: a photo of the car's own tyre screen next to the dashboard, with one tyre let down, matched them one to one on a 2024 Model Y ([#237](https://github.com/hypery11/flipper-tesla-fsd/issues/237)). That is one car so far. The 5-byte form names each sensor's wheel from its own location field; when a sensor has none, the columns stay in the order the car sends them, numbered 1-4
+  - A switch in the card's header folds it, and a Unit row picks bar or psi; both are kept per browser, like the Performance card's switch
+  - `GET /api/status` carries it under `tpms`: `seen`, `src` (0 none, 1 per-sensor frames, 2 the kind-5 frame), `dlc` (length of the last `0x219`), `age_s`, `stale`, and per slot `mbar`, `temp` (°C) and `pos` (0 FL, 1 FR, 2 RL, 3 RR), plus `target` (mbar); `null` = not known
+- **CAN Bus Stats** — RX and TX frame counts, CAN errors (RX missed / bus / TX fail), frames/second
+  - **Reset** zeroes them without a reboot, after a confirm. The device keeps the baseline, so every open dashboard shows the same reset; the counters the black box, capture metadata, Tap Check and `canstat` read are left alone
+  - On T-2CAN and T-2CAN FD the card adds the same numbers per bus (`can0` TWAI, `can1` MCP2515 / MCP2518FD), or "not detected" when that controller is not running
 - **HTTP CAN Log Stream** — phone-friendly candump collection via dashboard button; device streams CAN frames over HTTP on port 82 and the browser saves the collected `.dump` file on Stop
 - **Web Controls** — toggle buttons and selectors for:
   - Activate / Stop (Listen-Only ↔ Active; TX on or off)
@@ -76,12 +90,14 @@ Most CAN protocol handling from hypery11's Flipper Zero implementation (`fsd_han
   - Telemetry Off (experimental) (clears reachable telemetry-enable flags on `0x3F8` / `0x3FD` mux1)
   - AP Branch/Tier selector (experimental apmv3 — Live / Stage / Dev / Stage2 / EAP / Demo, or Off)
   - Track Mode (experimental) (adjustable rotation / stability / cooling via `0x313`)
+  - Acceleration Mode (experimental) (Off / Chill / Standard / Performance pedal map on `0x334`, switches at standstill; shows the car's map and what goes out)
+  - EU Charge-Port Type (experimental) (read-only charge-port type read-out always on; opt-in rewrite re-sends `0x25D` with `CP_type` = IEC CCS so EU Superchargers show in nav, behind a plug guard)
   - Hardware override selector (Auto-detect / Force HW4 / Force HW3 / Force Legacy)
 - **OTA Warning Banner** — pulsing red alert when vehicle OTA update is detected (same banner style for the in-car Autopark TX pause)
 - **CAN Errors** — combined controller error count with an RX missed / bus / TX fail split (mostly RX-queue drops on a busy bus, not failed sends)
-- **Connection Status** — green/red dot indicator with auto-reconnect on WebSocket disconnect
-- **Device Info** — firmware build date, uptime counter, WiFi client count
-- **REST API** — `GET /api/status` returns full JSON state
+- **Connection Status** — green/red dot indicator with auto-reconnect on WebSocket disconnect; stays green while HTTP polling is working
+- **Device Info** — release version and build date, uptime counter, WiFi client count; the footer names the board the image was built for
+- **REST API** — `GET /api/status` returns full JSON state; `POST /api/cmd` takes the same `{"cmd":…,"value":…}` JSON as a WebSocket message (`Content-Type: application/json` required). A command is picked by its `"cmd"` value and its value has to be the type the command takes (`true`/`false` for a switch, a whole number for a setting). One the device refuses changes nothing and gets `{"ok":false,"err":…}` back, as a 400 on `/api/cmd` and as a frame on the WebSocket; `wifi_cfg` names the field in `"field"` and is taken whole or not at all, without a restart when refused. Commands are only taken from the dashboard's own page: a browser sends the page's origin along, and one that is not `http://` plus the device's address or hostname (bare, or under `.local`, `.lan`, `.home`, `.internal`, `.localdomain` or `.home.arpa`) is refused, with a 403 on `/api/cmd` and a failed handshake on the WebSocket. That covers DNS rebinding too. Clients that send no `Origin` header (curl, scripts) are not affected. The page itself is only served under those names; under any other one (on the device's AP every name leads to it) it redirects to the device's address
 - **TTGO T-Display dashboard** — optional on-board ST7789 status display for the `ttgo-tdisplay` build
 - **Web firmware update** — the OTA Firmware Update card takes the app-only `tesla-fsd-<env>.bin` from a release (user `admin`, password = the WiFi AP password). The new image is confirmed after 15 s of runtime; a crash, watchdog reset, brownout or power cut before that boots the previous firmware, so just run the update again.
 
@@ -91,6 +107,7 @@ Dual CAN driver support (compile-time switch):
 - **ESP32 TWAI** — for M5Stack ATOM Lite + ATOMIC CAN Base (CA-IS3050G transceiver)
 - **MCP2515 SPI** — for generic ESP32 + MCP2515 CAN module setups
 - **LilyGO T-2CAN dual** — native TWAI as `can0` + onboard MCP2515 as `can1`
+- **LilyGO T-2CAN FD dual** — native TWAI as `can0` + onboard MCP2518FD as `can1`, run as classic CAN 2.0
 
 ### HW-Based AP/DAS Mapping
 
@@ -122,11 +139,14 @@ Auto-detect picks the source. If it's wrong, pin the car with the Hardware selec
 | **RHD Override** | `0x3F8` | Right-Hand Drive driving-side override (bits 40-41); RHD markets only |
 | **Telemetry Off** | `0x3F8` / `0x3FD` mux1 | Experimental; clears reachable telemetry-enable flags |
 | **Track Mode** | `0x313` | Experimental adjustable Track Mode (rotation / stability / cooling) |
+| **Acceleration Mode** | `0x334` | Experimental pedal-map override (`UI_pedalMap` byte0 bits 5-6), off by default. Rewrites the car's own frame (counter kept, checksum recomputed) and only switches at standstill (fresh `0x257` ≤ 1 km/h, or `0x118` gear P); Off or a touchscreen change while driving returns to pass-through at once. Needs a Vehicle or Chassis CAN tap. Idea from [ColinM-sys/tesla-can-boost](https://github.com/ColinM-sys/tesla-can-boost) ([#211](https://github.com/hypery11/flipper-tesla-fsd/issues/211)) |
+| **EU Charge-Port Type** | `0x25D` | Read-only `CP_type` read-out is always on, in every mode. Opt-in rewrite (off by default) re-sends `CP_status` with `CP_type` = IEC CCS (byte0 bits 0-1, no counter/checksum) on the bus it arrived on, so EU Superchargers appear in nav. Only a standard 8-byte US-type frame is copied — never an already-EU or non-US frame — and a per-frame plug guard holds the rewrite while a cable is present or charging (and when the plug state is unknown). Needs a Vehicle CAN tap: Party CAN carries a `0x25D` too, but that is the 6-byte `DAS_road` frame, not `CP_status`, and is left alone. Idea + on-car validation: @Tesla234987234sdf ([#228](https://github.com/hypery11/flipper-tesla-fsd/discussions/228)) |
 | **HW Override** | — | Manual Auto-detect / Force HW4 / Force HW3 / Force Legacy selector |
 | **Battery Precondition** | `0x082` | Preheat trigger, re-sent every 500 ms while the dashboard **Precondition** switch is on (off by default) |
 | **TLSSC Restore** | `0x331` | Recovers stop sign / traffic light control on VIN-banned cars |
-| **Continuous AP** | `0x229` | HW3/Legacy, off by default: after AP drops during a turn-signal lane change, re-engages it with a right-stalk double press (brake or full stalk-up cancels) |
+| **Continuous AP** | `0x229` | HW3/Legacy, off by default: after AP drops during a turn-signal lane change, re-engages it with a right-stalk double press (brake or full stalk-up cancels), sent only on a bus that carries the car's own `0x229` |
 | **BMS Dashboard** | `0x132`/`0x292`/`0x312` | Model 3/Y frames; wrong values on S/X, not yet confirmed on the ESP32 |
+| **Tyre Pressure** | `0x219` | Read-only: four pressures per wheel (bar or psi); needs a tap carrying `0x219` (Vehicle CAN) |
 | **OTA Protection** | `0x318` | Auto-stops TX when OTA update detected unless Ignore OTA is enabled |
 | **HW Auto-Detect** | `0x398` | Reads GTW_carConfig for HW version |
 | **Listen-Only Mode** | — | Default on first boot, passive monitoring only; the chosen mode is saved and restored on the next boot |
@@ -157,8 +177,9 @@ Any ESP32 board + CAN transceiver works. Pick the matching build env in `platfor
 | `esp32-mcp2515` | Generic ESP32 + MCP2515 module | MCP2515 SPI | SPI CS=5 | 8 MHz crystal |
 | `esp32-lilygo` | LilyGO T-CAN485 | TWAI | 27 / 26 | Built-in SN65HVD230 + SD slot |
 | `ttgo-tdisplay` | LilyGO/TTGO T-Display + MCP2515 | MCP2515 SPI (HSPI) | CS=26, SCK=33, MISO=32, MOSI=25 | Built-in ST7789 dashboard, MISO needs 5V→3.3V divider |
-| `lilygo-t2can` | LilyGO-T2CAN | TWAI/MCP2515 SPI | 7 / 6 | ESP32-S3-WROOM-1U (MCN16R8) with MCP2515 |
-| `waveshare-s3-can` | Waveshare ESP32-S3-RS485-CAN | TWAI | 15 / 16 | ESP32-S3, 8MB flash/PSRAM, USB-CDC |
+| `lilygo-t2can` | LilyGO-T2CAN | TWAI/MCP2515 SPI | 7 / 6 | ESP32-S3-WROOM-1U (MCN16R8) with MCP2515; the 8 MB PSRAM holds the black-box ring (40000 frames) |
+| `lilygo-t2can-fd` | LilyGO T-2CAN FD (H784-A) | TWAI/MCP2518FD SPI | 7 / 6 | Same board with an MCP2518FD on `can1`, classic CAN 2.0 at 500 kbps; PSRAM as on `lilygo-t2can`; not yet confirmed on real hardware |
+| `waveshare-s3-can` | Waveshare ESP32-S3-RS485-CAN | TWAI | 15 / 16 | ESP32-S3R8 (8 MB octal PSRAM in the chip) with 16 MB flash, USB-CDC. The build uses 8 MB of the flash and doesn't enable the PSRAM yet (board default memory type, no `BOARD_HAS_PSRAM`), so the black-box ring is the internal-RAM one (6000 frames) |
 | `esp32-generic-twai` | Classic ESP32 DevKit + SN65HVD230 | TWAI | 21 / 22 | No LED; build from source (no prebuilt image) |
 | `esp32-generic-twai-sniffer` | Classic ESP32 DevKit + SN65HVD230 | TWAI (hardware Listen-Only) | 21 / 22 | `SNIFFER_ONLY`: can never transmit; build from source |
 | other | Any ESP32 / ESP32-S3 + CAN transceiver | TWAI | any two pins | Copy the closest env and override `PIN_CAN_TX` / `PIN_CAN_RX` (the envs target classic ESP32 or ESP32-S3; there is no ESP32-C3 env) |
@@ -209,12 +230,25 @@ LILYGO's physical connector names are easy to confuse with this project's `can0`
 | `can1` / MCP2515 | Party CAN | `2 / 3` | Nag-Killer A torque target: `0x370` |
 | `can1` / MCP2515 | Vehicle CAN | `9 / 10` | Scroll/stalk/light/preheat/service: `0x3C2`, `0x229`, `0x249`, `0x273`, `0x339` |
 
-Pins shown are for one harness (`1933903-XX`). Confirm yours on **Service Mode → CAN Port** before wiring.
+Pins shown are for one harness (`1933903-XX`). Confirm yours with your car's wiring diagram before wiring (or on **Service Mode → CAN Port**, where the car has it).
+
+The dashboard's **Tap Check** card adds a **Bus hint** per bus from `0x3C2`: seen there, the pair is likely Vehicle CAN; body frames without it point to the subset the gateway forwards. `0x3C2` showing only on Vehicle CAN is what contributors report and what the public DBCs say, not something confirmed on every car, so treat it as a hint and let the car's wiring diagram decide (or the CAN Port page, where the car has one).
 
 > [!IMPORTANT]
 > The official LILYGO T-2CAN V1.0 labels physical `CANA` as MCP2515/SPI and physical `CANB` as native TWAI.
 
 `can1` is one MCP2515 physical channel. It can be wired to Party CAN or Vehicle CAN for a given test/install, but one MCP2515 channel cannot be on both vehicle networks at the same time.
+
+The Continuous AP `0x229` press continues the counter of the car's own `0x229`, so it goes out only on a bus where that frame was seen in the last 500 ms: `can1` when both carry it, `can0` when only `can0` does, and not at all when neither does.
+
+#### T-2CAN FD (H784-A)
+
+The FD version has an MCP2518FD where the classic board has the MCP2515, on the same `CANA` terminals and the same SPI pins (CS 10, SCK 12, MOSI 11, MISO 13). Flash `lilygo-t2can-fd` on it: the `lilygo-t2can` image boots, but its `can1` stays dead. The bus mapping above is unchanged.
+
+- `can1` runs classic CAN 2.0 at 500 kbps, like the MCP2515: it never sends a CAN FD frame, drops any it sees in Listen-Only, and in Active treats one as a bus error, as any classic CAN node does.
+- At every boot the driver starts the MCP2518FD in Listen-Only and measures its crystal (40 MHz on LilyGO's schematic). If the measurement doesn't match, `can1` stays off the bus and the serial log says what it measured.
+- The MCP2518FD has no reset pin. GPIO 9 goes to its INT0/GPIO0 pin and GPIO 3 (through the DIP switch next to the chip) to INT1/GPIO1; the firmware drives neither.
+- Not yet confirmed on real hardware. Start in Listen-Only and check that `can1` receives before you switch to Active.
 
 ### OBD-II (Primary — Plug & Play)
 
@@ -234,8 +268,10 @@ Located in the rear center console area:
 > [!IMPORTANT]
 > **The X179 pin→bus map is not fixed — verify it on your own car.** On many
 > harnesses pins 13/14 are **Chassis CAN**, not the "Bus 6" mix, and the third
-> CAN pair has moved to other pins on newer builds. The deterministic check is
-> the car's **Service Mode → CAN Port** page, which lists each pin's bus by name.
+> CAN pair has moved to other pins on newer builds. Check your car's wiring
+> diagram first. Where the car has it, the **Service Mode → CAN Port** page is
+> the deterministic check and lists each pin's bus by name; not every car shows
+> it without Service+.
 > See [HARDWARE.md – X179](../HARDWARE.md#x179--behind-the-rear-center-console-2021-model-3y)
 > for the per-harness maps before you tap.
 
@@ -250,7 +286,8 @@ Most IDs are common. The AP/DAS status and ISA-speed meaning depends on the dete
 | `0x045` | STW_ACTN_RQ | Steering stalk (Legacy follow distance) |
 | `0x082` | TRIP_PLANNING | Battery precondition trigger |
 | `0x132` | BMS_HV_BUS | Battery voltage / current |
-| `0x292` | BMS_SOC | Battery state of charge |
+| `0x219` | VCSEC_TPMS | Tyre pressures (read-only) |
+| `0x292` | BMS_SOC | Battery state of charge (`BMS_socUI`, bit 10, 0.1 %) |
 | `0x312` | BMS_THERMAL | Battery temperature |
 | `0x318` | GTW_CAR_STATE | Vehicle state (OTA detection) |
 | `0x370` | EPAS_STATUS | EPAS status (NAG killer target) |
@@ -283,7 +320,7 @@ Bus speed: **500 kbps**
 
 ## Build & Flash
 
-No toolchain? Flash a prebuilt image from the [Web Flasher](https://hypery11.github.io/flipper-tesla-fsd/install/) (Chrome / Edge / Opera on a desktop).
+No toolchain? Flash a prebuilt image from the [Web Flasher](https://hypery11.github.io/flipper-tesla-fsd/install/) (Chrome / Edge / Opera on a desktop). It installs the newest stable release. When a newer test build is out, the page offers it as an opt-in link, and `…/install/#beta` selects it directly.
 
 ### Prerequisites
 - [PlatformIO](https://platformio.org/) (CLI or VSCode extension)
@@ -295,6 +332,8 @@ git clone https://github.com/hypery11/flipper-tesla-fsd.git
 cd flipper-tesla-fsd/esp32
 pio run -e m5stack-atom
 ```
+
+CI runs `ci_check_stack.py` after each build. It adds up the stack frames along the deepest loop-task call chains (the dashboard WebSocket, its handshake included; the HTTP routes for status, commands, the black-box list and download, the OTA upload and its login; the CAN stream; a CAN frame; the black-box flush; the button; `setup()`), plus measured allowances for the library code below them, and fails the build when one passes 93% of the loop task's stack (`SET_LOOP_TASK_STACK_SIZE` in `main.cpp`). Chains for code that only some boards build (the black box on LittleFS or SD, the LilyGO SD card and deep sleep) are checked on the builds that compile it. The build also fails when a function with a frame of 512 bytes or more is on none of the chains: add the call chain it runs on to `_CHAINS` in the script, shrink the frame, or list it in `_KNOWN_SAFE` with the reason it is safe. Run it yourself after a build with `python3 ci_check_stack.py .pio/build/m5stack-atom`. New fields in `FSDState` (each copy of it is a 792-byte local) and new locals in `loop()`, `process_frame()`, `build_json()` or `web_command()` are what move the numbers.
 
 ### Flash
 ```bash
@@ -311,6 +350,8 @@ pio device monitor -b 115200
 ============================
  Tesla Mod — ESP32
 ============================
+[FSD] Version: v2.16-beta.38
+[FSD] Board: M5Stack ATOM Lite + ATOMIC CAN Base
 [FSD] Build: Apr  8 2026 18:59:17
 [CAN] Driver: ESP32 TWAI (M5Stack ATOM Lite + ATOMIC CAN Base)
 [CAN] 500 kbps — Listen-Only
@@ -322,6 +363,15 @@ pio device monitor -b 115200
 [WiFi] Dashboard: http://192.168.4.1
 [Web] HTTP :80  WS :81 — ready
 ```
+
+### Serial Commands
+
+Type these into the serial monitor:
+
+| Command | Prints |
+|---|---|
+| `ip` | WiFi status and dashboard URLs |
+| `canstat` | One line per CAN bus: RX/TX counts, rejected frames, hardware filter, then the controller's own state. TWAI: mode, controller state, TEC/REC, `rx_missed` (driver queue full), `rx_overrun` (controller FIFO full), `bus_err`, `tx_fail`, frames still waiting to be sent. MCP2515: mode, the EFLG error flags, TEC/REC and failed sends; the chip keeps no count of lost frames, so an overflow only shows as a flag. MCP2518FD (T-2CAN FD): mode, TEC/REC, bus-off / error-passive, RX FIFO overflow events, bus errors, failed sends and the measured crystal |
 
 ---
 
@@ -362,7 +412,31 @@ pio device monitor -b 115200
 3. Monitor and control everything from the web UI
 4. Tap **STREAM LOG AND SAVE** to collect a CAN log on the phone; tap **STOP COLLECTING**, then **SAVE LOG FILE** to save it as a candump `.dump` file
 5. REST API available at `http://192.168.4.1/api/status`
-6. Raw CAN stream endpoint: `http://192.168.4.1:82/stream`
+6. Raw CAN stream endpoint: `http://192.168.4.1:82/stream`. Address it by the device's IP or hostname; in a browser, only the dashboard's own page can read it
+
+### Why did the board restart? (reset reason)
+
+The boot banner and the dashboard's **Device › Power** row report why the board last came up: power-on, brownout (the supply sagged — thin tap wire, a cold crimp, an e-fuse near its limit), panic or watchdog (a crash — not the supply's fault), a plain software restart, or a deep-sleep wake. Beside it, the restarts since power-on: a crash, watchdog, brownout or software restart adds one, a power-on starts again from 0, and a deep-sleep wake does not count (the LilyGO T-CAN485 boots on every CAN wake). `GET /api/status` carries the same as `reset_reason` (0 unknown, 1 power-on, 2 brownout, 3 panic, 4 watchdog, 5 software, 6 deep-sleep wake, 7 external) and `restart_count`, so a tester can paste it.
+
+### 12 V feed test — is the tap switched or always-on?
+
+The rear tap carries CAN, ground and 12 V. Whether that 12 V is **switched** (dies when the car sleeps) or **always-on** (powers the module overnight and wakes it whenever the car wakes) decides the final install. A multimeter can't answer it well — reaching the connector means opening a door, which wakes the car — but the board can, by watching whether it outlives the bus going quiet. The verdict shows in **Device › Power** and in `GET /api/status` as `power_verdict` (0 not-known-yet, 1 inconclusive/car-never-slept, 2 switched, 3 always-on, 4 brownout, 5 crash, 6 inconclusive/USB).
+
+To run it:
+
+1. Flash and wire the module to the tap as usual, then **leave it powered from the car only**.
+2. **Unplug USB** and walk away — see the caveat below.
+3. Park the car and let it sleep. A Tesla takes roughly 15–30 min to sleep after the last door/app/sentry activity; the bus goes quiet first, the 12 V (if switched) drops some minutes later.
+4. Come back later, reconnect to the **Tesla-FSD** Wi-Fi, open the dashboard, and read **Device › Power**:
+   - **Switched (dies with the car)** — the board lost power after the bus went quiet. The feed is switched.
+   - **Always-on (outlives the car)** — the board was still running (or, on the LilyGO T-CAN485, had kept its state across a deep sleep) long after the bus went quiet. The feed is always-on; the module will draw current and wake with the car.
+   - **Inconclusive (car never slept)** — the bus never went quiet during the session (sentry left on, a scheduled charge, someone opened the app). The test says nothing; try again when the car can actually sleep.
+   - **Not known yet** — no quiet period has been seen yet this session. Give it longer.
+   - **Brownout / Crash** — the board reset for a reason unrelated to the car switching it off; the reset-reason line explains which.
+
+The evidence is written to flash (NVS) so it survives the board losing power, which is the whole point — the answer is read back on the next boot. Writes stay off the CAN path: nothing is written to flash while frames are arriving, only at a single checkpoint once the bus has been quiet for about 30 s (and, on the LilyGO, once more as it enters deep sleep), so a busy bus never loses a frame to a flash stall.
+
+> **🔴 USB defeats the test.** Plugging in the USB cable to watch the serial port also powers the board, so the car's feed can vanish without the module noticing — and a module kept alive by USB looks exactly like an always-on feed. Run the test on car power only. On the native-USB boards (LilyGO T-2CAN, Waveshare S3) the firmware notices an attached USB host and reports the always-on verdict as *inconclusive (USB powered)* instead; on the UART-bridge boards it cannot tell, so it is on you to leave USB unplugged.
 
 ### Capture fidelity — the two drop metrics
 
@@ -424,7 +498,7 @@ state after synchronization and whenever it changes during the capture.
 - **Frame checks** — frames with DLC > 8 are dropped in the driver; extended and remote frames go into captures but never reach a parser or handler; `send()` refuses anything that isn't an 11-bit id with at most 8 bytes; every handler checks the data length before parsing
 - **Unplug = reset** — remove the device and restart the car to clear any modified state
 - **Web OTA rollback** — a web-flashed image is confirmed only after 15 s of runtime; a crash or power cut before that boots the previous firmware
-- **WiFi** — runs its own access point by default. If you set a network under Connect to WiFi, it joins that network and falls back to its own AP when it can't connect. The firmware makes no internet connections
+- **WiFi** — runs its own access point by default. If you set a network under Connect to WiFi, it joins that network and falls back to its own AP when it can't connect. On that network it goes by the Hostname set on the same card (default `tesla-fsd`), the name your router lists it under; there is no mDNS. The firmware makes no internet connections
 
 ---
 
@@ -453,7 +527,7 @@ esp32/
 │   ├── fsd_handler.cpp/h   — CAN protocol logic (ported from hypery11; also includes the shared ../fsd_logic headers such as fsd_ota.h and fsd_autopark.h)
 │   ├── can_signals.h       — Bit/byte positions for the parsed and written signals
 │   ├── http_can_stream.cpp/h — HTTP candump-compatible CAN stream
-│   ├── can_driver.cpp/h    — CAN driver abstraction (TWAI / MCP2515 / T-2CAN dual)
+│   ├── can_driver.cpp/h    — CAN driver abstraction (TWAI / MCP2515 / T-2CAN dual / T-2CAN FD)
 │   ├── can_dump.cpp/h      — SD-card CAN dump
 │   ├── blackbox.cpp/h      — Black-box incident recorder (#124)
 │   ├── capability.cpp/h    — Tap capability checker (#125)
@@ -467,7 +541,10 @@ esp32/
 │   └── config.h            — CAN IDs and pin definitions
 ├── platformio.ini          — Build configs (one env per board, see Alternative Hardware)
 ├── build_firmware.sh       — Local build + packaging helper
+├── gen_version.py          — Pre-build step that sets FW_VERSION (release tag / `git describe`; override with the FW_VERSION env var)
+├── gen_web_page.py         — Pre-build step that gzips the dashboard page into the build directory (served with Content-Encoding: gzip)
 ├── merge_firmware.py       — Post-build step that writes firmware-merged.bin for the web flasher
+├── ci_check_stack.py       — CI check of the loop task's deepest call chains against its stack size
 └── README.md
 ```
 

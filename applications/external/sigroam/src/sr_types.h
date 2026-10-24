@@ -133,6 +133,7 @@ typedef enum {
     SrEventUp, /* H2 Up: line; must append after Radio */
     SrEventRank, /* Account Rank: line; must append after Up */
     SrEventCfg, /* Cfg: line; must append after Rank */
+    SrEventBand, /* Band: line; must append after Cfg */
 } SrEventKind;
 
 /* Pin the trailing kinds so inserting SrEventSess before Unknown silently
@@ -148,6 +149,7 @@ _Static_assert((int)SrEventRadio == 11, "SrEventRadio appends after Qual");
 _Static_assert((int)SrEventUp == 12, "SrEventUp appends after Radio");
 _Static_assert((int)SrEventRank == 13, "SrEventRank appends after Up");
 _Static_assert((int)SrEventCfg == 14, "SrEventCfg appends after Rank");
+_Static_assert((int)SrEventBand == 15, "SrEventBand appends after Cfg");
 
 /* -------------------------------------------------------------------------- */
 /* Structs                                                                    */
@@ -170,6 +172,9 @@ typedef struct {
     bool diag_seen;
     uint8_t diag_state; /* sr_session_state_t on the board */
     uint8_t diag_seal; /* SR_SEAL_* bitmap on the board   */
+    /* Occupies the pad byte before diag_hb. 0/1/2 = none/armed/yes.
+     * Not a Version check. sizeof(SrFirmwareInfo) stays 192. */
+    uint8_t sigroam_cap;
     uint32_t diag_hb[SR_DIAG_HB_COUNT]; /* gps, link, scan, fuse, store, ble */
 } SrFirmwareInfo;
 
@@ -278,6 +283,18 @@ typedef struct {
     uint8_t home;
     char ssid[33];
 } SrCfgInfo;
+
+/*
+ * "Band: w24=<u32> w5=<u32>"
+ * Scout Lite session counts after Cfg:. Absence is band_rev == 0, not zero.
+ * Older firmware has no line. Narrower than SrFirmwareInfo, so SrEvent stays 240.
+ */
+typedef struct {
+    uint32_t w24;
+    uint32_t w5;
+} SrBandInfo;
+
+_Static_assert(sizeof(SrBandInfo) == 8, "SrBandInfo is 2 x uint32");
 
 /*
  * ref: V-001
@@ -389,6 +406,7 @@ typedef struct {
         SrUpInfo up; /* SrEventUp — narrower than SrFirmwareInfo */
         SrRankInfo rank; /* SrEventRank — 12 B, narrower than SrFirmwareInfo */
         SrCfgInfo cfg; /* SrEventCfg — ssid[33], narrower than SrFirmwareInfo */
+        SrBandInfo band; /* SrEventBand — 8 B, narrower than SrFirmwareInfo */
     } u;
 } SrEvent;
 

@@ -19,6 +19,7 @@ static const char* submenu_names[SetTypeMAX] = {
     [SetTypeGenius_868] = "Genius 868MHz",
     [SetTypeBFTMitto] = "BFT Mitto 433MHz",
     [SetTypeErreka433] = "Erreka 433MHz",
+    [SetTypeErreka868] = "Erreka 868MHz",
     [SetTypeSomfyTelis] = "Somfy Telis 433MHz",
     [SetTypeSomfyKeytis] = "Somfy Keytis 433MHz",
     [SetTypeANMotorsAT4] = "AN-Motors AT4 433MHz",
@@ -84,6 +85,9 @@ static const char* submenu_names[SetTypeMAX] = {
     [SetTypeNiceSmilo_433_92] = "KL: Nice Smilo 433MHz",
     [SetTypeNiceFlorS_433_92] = "Nice FloR-S 433MHz",
     [SetTypeNiceOne_433_92] = "Nice One 433MHz",
+    [SetTypeNiceOCode_433_92] = "Nice O-Code 433MHz",
+    [SetTypeNiceOCodeOne_433_92] = "Nice O-Code One 433MHz",
+    [SetTypeNiceOCodeCert_433_92] = "Nice O-Code+Crt 433MHz",
     [SetTypeNiceFlo12bit] = "Nice Flo 12bit 433MHz",
     [SetTypeNiceFlo24bit] = "Nice Flo 24bit 433MHz",
     [SetTypeCAME12bit] = "CAME 12bit 433MHz",
@@ -122,8 +126,23 @@ void subghz_scene_set_type_on_enter(void* context) {
     SubGhz* subghz = context;
 
     for(SetType i = 0; i < SetTypeMAX; i++) {
+        if(i == SetTypeNiceOCodeOne_433_92 || i == SetTypeNiceOCodeCert_433_92) continue;
         submenu_add_item(
             subghz->submenu, submenu_names[i], i, subghz_scene_set_type_submenu_callback, subghz);
+        if(i == SetTypeNiceOCode_433_92) {
+            submenu_add_item(
+                subghz->submenu,
+                submenu_names[SetTypeNiceOCodeOne_433_92],
+                SetTypeNiceOCodeOne_433_92,
+                subghz_scene_set_type_submenu_callback,
+                subghz);
+            submenu_add_item(
+                subghz->submenu,
+                submenu_names[SetTypeNiceOCodeCert_433_92],
+                SetTypeNiceOCodeCert_433_92,
+                subghz_scene_set_type_submenu_callback,
+                subghz);
+        }
     }
 
     view_dispatcher_switch_to_view(subghz->view_dispatcher, SubGhzViewIdMenu);
@@ -264,7 +283,10 @@ bool subghz_scene_set_type_generate_protocol_from_infos(SubGhz* subghz) {
             gen_info.nice_flor_s.serial,
             gen_info.nice_flor_s.btn,
             gen_info.nice_flor_s.cnt,
-            gen_info.nice_flor_s.nice_one);
+            gen_info.nice_flor_s.nice_one,
+            gen_info.nice_flor_s.o_code,
+            gen_info.nice_flor_s.ic,
+            0);
         break;
     case GenSecPlus1:
         generated_protocol =
@@ -323,6 +345,11 @@ bool subghz_scene_set_type_on_event(void* context, SceneManagerEvent event) {
         subghz_gen_info_reset(subghz->gen_info);
         subghz_scene_set_type_fill_generation_infos(subghz->gen_info, event.event);
 
+        if((subghz->gen_info->type == GenNiceFlorS) && subghz->gen_info->nice_flor_s.cert_wanted) {
+            scene_manager_next_scene(subghz->scene_manager, SubGhzSceneSetSerial);
+            return true;
+        }
+
         if(scene_manager_get_scene_state(subghz->scene_manager, SubGhzSceneSetType) ==
            SubmenuIndexAddManually) {
             generated_protocol = subghz_scene_set_type_generate_protocol_from_infos(subghz);
@@ -346,7 +373,7 @@ bool subghz_scene_set_type_on_event(void* context, SceneManagerEvent event) {
             case GenBenincaARC: // Serial (u32), Button (u8), Counter (u32)
             case GenJarolift: // Serial (u32), Button (u4), Counter (u16)
             case GenDitecGOL4: // Serial (u32), Button (u4), Counter (u16)
-            case GenNiceFlorS: // Serial (u32), Button (u8), Counter (u16)
+            case GenNiceFlorS: // Serial (u32), Button (u8), Counter (u16), IC (u16, O-Code)
             case GenSecPlus2: // Serial (u32), Button (u8), Counter (u32)
             case GenPhoenixV2: // Serial (u32), Counter (u16)
             case GenPrastel: // Serial (u32), Button (u8), Counter (u16)

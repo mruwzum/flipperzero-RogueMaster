@@ -81,6 +81,7 @@ typedef enum {
     SetTypeGenius_868,
     SetTypeBFTMitto,
     SetTypeErreka433,
+    SetTypeErreka868,
     SetTypeSomfyTelis,
     SetTypeSomfyKeytis,
     SetTypeKingGatesStylo4k,
@@ -145,6 +146,7 @@ typedef enum {
     SetTypeNiceSmilo_433_92,
     SetTypeNiceFlorS_433_92,
     SetTypeNiceOne_433_92,
+    SetTypeNiceOCode_433_92,
     SetTypeNiceFlo12bit,
     SetTypeNiceFlo24bit,
     SetTypeCAME12bit,
@@ -180,5 +182,7 @@ typedef enum {
     SetTypeSecPlus_v2_433_00,
 
     SetTypeTelcomaEdge433,
+    SetTypeNiceOCodeOne_433_92,
+    SetTypeNiceOCodeCert_433_92,
     SetTypeMAX,
 } SetType;

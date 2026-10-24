@@ -91,7 +91,13 @@ typedef struct {
             uint32_t serial;
             uint8_t btn;
             uint16_t cnt;
+            uint16_t ic;
+            /* Receiver certificate, big endian so byte_input can write it in place.
+               cert_wanted marks the variant that asks for one. */
+            uint8_t cert[3];
+            bool cert_wanted;
             bool nice_one;
+            bool o_code;
         } nice_flor_s;
         struct {
             uint32_t serial;

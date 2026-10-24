@@ -14,6 +14,9 @@
 #include "../../fsd_logic/fsd_checksum.h"  // shared Tesla additive checksum (single impl, both platforms)
 #include "../../fsd_logic/fsd_can_ops.h"   // shared stateless frame primitives (set_bit / mux / fsd-selected)
 #include "../../fsd_logic/fsd_ota.h"       // shared 0x318 OTA-install detection (flag vs rolling counter)
+#include "../../fsd_logic/fsd_cp_status.h" // shared 0x25D CP_status decode + EU rewrite predicate (#228)
+#include "../../fsd_logic/fsd_steer.h"     // shared 0x129 steering-angle decode + freshness
+#include "../../fsd_logic/fsd_bms.h"       // shared 0x292 SOC, 0x312 pack-temperature gate, 0x33A car SOC
 #include <string.h>
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -58,6 +61,7 @@ void fsd_state_init(FSDState *state, TeslaHWVersion hw) {
     state->track_stability_pct  = 30;       // 30% keeps a safety margin but lets it move
     state->track_post_cooling   = false;
     state->track_cmp_overclock  = false;
+    state->accel_mode           = ACCEL_MODE_OFF;  // Acceleration Mode override, default pass-through (#211)
     state->fsd_unlock           = false;
     state->force_fsd            = false;
     state->china_mode           = false;
@@ -76,6 +80,7 @@ void fsd_state_init(FSDState *state, TeslaHWVersion hw) {
     state->wifi_hidden = false;
     state->wifi_sta_ssid[0] = '\0';
     state->wifi_sta_pass[0] = '\0';
+    strncpy(state->wifi_hostname, WIFI_HOSTNAME_DEFAULT, sizeof(state->wifi_hostname));
 }
 
 void fsd_apply_hw_version(FSDState *state, TeslaHWVersion hw) {
@@ -262,6 +267,98 @@ bool fsd_handle_track_mode_inject(FSDState *state, CanFrame *frame) {
     set_bit(frame, 25, state->track_cmp_overclock);                  // UI_trackCmpOverclock (byte3 bit1)
     frame->data[7] = tesla_additive_checksum(CAN_ID_TRACK_MODE_SET, frame->data, 7);
     return true;
+}
+
+// ── Acceleration Mode override (UI_powertrainControl 0x334, #211) ────────────
+// The gateway forwards the touchscreen's 0x334 every 500 ms and the drive
+// inverter takes the pedal map from it. Rewrite UI_pedalMap on the car's own
+// frame, keep its counter, recompute the checksum and re-send on the same bus;
+// the touchscreen keeps showing the driver's own mode. Idea from
+// ColinM-sys/tesla-can-boost (#211), written from its README facts only.
+//
+// Guards: a new value latches only at standstill. Off, a blocked TX gate
+// (Listen-Only / OTA / Autopark) and a touchscreen mode change while moving
+// drop to pass-through at once and wait for the next standstill. Frames with
+// a wrong DLC, a bad checksum or pedal map 3 are never touched — legacy S/X
+// reuse id 0x334 for unrelated frames.
+
+bool fsd_handle_di_gear(FSDState *state, const CanFrame *frame, uint32_t now_ms) {
+    if (frame->dlc != 8) return false;
+    if (frame->data[SIG_DI_STATUS_CHECKSUM_BYTE] !=
+        tesla_additive_checksum(CAN_ID_DI_SYS_STATUS, &frame->data[1], 7))
+        return false;
+    state->di_gear = (frame->data[SIG_DI_GEAR_BYTE] >> SIG_DI_GEAR_SHIFT) & SIG_DI_GEAR_MASK;
+    state->di_gear_seen = true;
+    state->last_gear_tick_ms = now_ms;
+    return true;
+}
+
+bool fsd_accel_standstill(const FSDState *state, uint32_t now_ms) {
+    // Fresh, valid speed decides. Uses the signed raw: vehicle_speed_kph clamps
+    // reverse to 0, which would read a car reversing at 4 km/h as stopped.
+    // SNA / out-of-range raws are unknown speed, not standstill.
+    if (state->speed_seen &&
+        (uint32_t)(now_ms - state->last_speed_tick_ms) <= ACCEL_CTX_FRESH_MS &&
+        state->di_speed_raw <= SIG_DI_SPEED_RAW_MAX_VALID) {
+        float kph = (float)state->di_speed_raw * 0.08f - 40.0f;
+        return kph <= ACCEL_STANDSTILL_KPH && kph >= -ACCEL_STANDSTILL_KPH;
+    }
+    if (state->di_gear_seen &&
+        (uint32_t)(now_ms - state->last_gear_tick_ms) <= ACCEL_CTX_FRESH_MS)
+        return state->di_gear == SIG_DI_GEAR_P;
+    return false;
+}
+
+bool fsd_handle_accel_mode(FSDState *state, CanFrame *frame, uint32_t now_ms) {
+    if (frame->dlc != 8 ||
+        frame->data[SIG_UI_POWERTRAIN_CHECKSUM_BYTE] !=
+            tesla_additive_checksum(CAN_ID_UI_POWERTRAIN, frame->data, 7)) {
+        state->accel_bad_frames++;
+        return false;
+    }
+    uint8_t car = (frame->data[SIG_UI_PEDAL_MAP_BYTE] >> SIG_UI_PEDAL_MAP_SHIFT) &
+                  SIG_UI_PEDAL_MAP_MASK;
+    if (car > SIG_UI_PEDAL_MAP_MAX) {
+        state->accel_bad_frames++;
+        return false;
+    }
+    // We never receive our own TX, so a change here is the driver on the touchscreen.
+    bool car_changed = state->accel_car_seen && car != state->accel_car_map;
+    state->accel_car_map  = car;
+    state->accel_car_seen = true;
+
+    uint8_t want = state->accel_mode;
+    if (want > ACCEL_MODE_PERFORMANCE) want = ACCEL_MODE_OFF;
+    if (want == ACCEL_MODE_OFF || !fsd_can_transmit(state)) {
+        state->accel_mode_applied = ACCEL_MODE_OFF;   // pass-through now
+        state->accel_mode_pending = false;
+        return false;
+    }
+    if (fsd_accel_standstill(state, now_ms))
+        state->accel_mode_applied = want;              // engage / change only when stopped
+    else if (car_changed)
+        state->accel_mode_applied = ACCEL_MODE_OFF;    // driver's change wins until the next stop
+    state->accel_mode_pending = state->accel_mode_applied != want;
+
+    if (state->accel_mode_applied == ACCEL_MODE_OFF) return false;
+    uint8_t map = (uint8_t)(state->accel_mode_applied - 1u);
+    if (map == car) return false;                       // car already sends it
+    frame->data[SIG_UI_PEDAL_MAP_BYTE] = (uint8_t)(
+        (frame->data[SIG_UI_PEDAL_MAP_BYTE] &
+         (uint8_t)~(SIG_UI_PEDAL_MAP_MASK << SIG_UI_PEDAL_MAP_SHIFT)) |
+        (map << SIG_UI_PEDAL_MAP_SHIFT));
+    frame->data[SIG_UI_POWERTRAIN_CHECKSUM_BYTE] =
+        tesla_additive_checksum(CAN_ID_UI_POWERTRAIN, frame->data, 7);
+    state->accel_frames_modified++;
+    return true;
+}
+
+int fsd_accel_sent_map(const FSDState *state) {
+    if (!state->accel_car_seen) return -1;
+    if (state->accel_mode_applied == ACCEL_MODE_OFF ||
+        state->accel_mode_applied > ACCEL_MODE_PERFORMANCE || !fsd_can_transmit(state))
+        return state->accel_car_map;
+    return (int)state->accel_mode_applied - 1;
 }
 
 // ── HW3/HW4 autopilot control (DAS_autopilotControl 0x3FD) ───────────────────
@@ -525,7 +622,8 @@ static uint32_t nag_xorshift32() {
 
 // EPAS-faithful (Mode-C) path — mirror of the Flipper fsd_handler.c logic (#100):
 // demand-state-driven torque, handsOnLevel derived from torque magnitude, direction
-// opposite steering. Raw 2048 = 0 Nm, raw = 2048 + Nm*100.
+// opposite steering (held near centre / while unknown, fsd_steer_nag_dir). Raw
+// 2048 = 0 Nm, raw = 2048 + Nm*100.
 static uint8_t nag_hands_level_from_raw(int16_t raw) {
     int16_t a = (raw >= 2048) ? (raw - 2048) : (2048 - raw);
     if (a >= 200) return 2;
@@ -569,11 +667,18 @@ void fsd_apply_signal_config(FSDState *state, const CanFrame *frame, uint32_t no
         state->das_ctx_seen_ms = now_ms;
     }
     if (state->cfg_steer_id != 0 && frame->id == state->cfg_steer_id) {
-        if (state->cfg_steer_hi < 8 && state->cfg_steer_lo < 8 &&
-            frame->dlc > state->cfg_steer_hi && frame->dlc > state->cfg_steer_lo) {
+        if (frame->id == CAN_ID_STEER_ANGLE) {
+            // 0x129 has one layout (fsd_steer.h): bytes 0-1 are its CRC and
+            // counter, and the angle counts only while its validity is VALID.
+            // hi/lo are for other frames.
+            if (frame->dlc >= FSD_STEER_MIN_DLC) state->steer_ctx_seen_ms = now_ms;
+            fsd_steer_update(state, frame->data, frame->dlc, now_ms);
+        } else if (state->cfg_steer_hi != state->cfg_steer_lo &&   // equal = not mapped
+                   state->cfg_steer_hi < 8 && state->cfg_steer_lo < 8 &&
+                   frame->dlc > state->cfg_steer_hi && frame->dlc > state->cfg_steer_lo) {
             int16_t raw = (int16_t)(((uint16_t)frame->data[state->cfg_steer_hi] << 8) |
                                     frame->data[state->cfg_steer_lo]);
-            state->steering_angle_deg = (float)raw * 0.1f;
+            fsd_steer_set(state, (float)raw * 0.1f, now_ms);
             state->steer_ctx_seen_ms = now_ms;
         }
     }
@@ -615,7 +720,7 @@ static bool nag_faithful_modec(FSDState *state, const CanFrame *frame,
         return false;
     }
 
-    int dir = (state->steering_angle_deg > 0.0f) ? -1 : 1;
+    int dir = fsd_steer_nag_dir(state, now_ms);
     int16_t torque;
     uint8_t level;
 
@@ -782,10 +887,17 @@ void fsd_handle_epas_status(FSDState *state, const CanFrame *frame) {
     state->torsion_bar_torque_seen = true;
 }
 
-// Soft-Engage gate — mirror of the Flipper fsd_soft_engage_allows (#108).
-bool fsd_soft_engage_allows(FSDState *state) {
+// Soft-Engage gate — mirror of the Flipper fsd_soft_engage_allows (#108). No
+// 0x129 on this tap: latch (AP-First-only). 0x129 present but no fresh valid
+// angle: hold.
+bool fsd_soft_engage_allows(FSDState *state, uint32_t now_ms) {
     if (!state->soft_engage) return true;
     if (state->soft_engage_latched) return true;
+    if (!state->steering_angle_seen) {
+        state->soft_engage_latched = true;
+        return true;
+    }
+    if (!fsd_steer_known(state, now_ms)) return false;
     float a = state->steering_angle_deg;
     if (a < 0.0f) a = -a;
     if (a > SOFT_ENGAGE_ANGLE_DEG) return false;   // turning — hold activation
@@ -816,15 +928,22 @@ void fsd_handle_di_speed(FSDState *state, const CanFrame *frame) {
     uint16_t raw = (uint16_t)(((uint16_t)frame->data[2] << 4) | (frame->data[1] >> 4));
     float kph = (float)raw * 0.08f - 40.0f;
     state->vehicle_speed_kph = kph < 0.0f ? 0.0f : kph;
+    state->di_speed_raw = raw;   // signed speed for the Acceleration Mode standstill gate (#211)
     state->ui_speed = frame->data[3];
     state->speed_seen = true;
 }
 
-// SCCM_steeringAngleSensor (0x129): 16-bit signed LE at byte0-1, factor 0.1 deg.
-void fsd_handle_steering_angle(FSDState *state, const CanFrame *frame) {
-    if (frame->dlc < 4) return;
-    int16_t raw = (int16_t)(((uint16_t)frame->data[1] << 8) | frame->data[0]);
-    state->steering_angle_deg = (float)raw * 0.1f;
+// Performance read-out: feed the timers and est. G only a valid speed. SNA (raw
+// 4095) decodes to 287.6 km/h and would lock 0-50 / 0-60 mph / 0-100 at once.
+void fsd_perf_on_speed(FSDState *state, uint32_t now_ms) {
+    if (state->di_speed_raw > SIG_DI_SPEED_RAW_MAX_VALID) return;
+    fsd_perf_update(&state->perf, state->vehicle_speed_kph, now_ms);
+}
+
+// SCCM_steeringAngleSensor (0x129): SCCM_steeringAngle 16|14 (0.1, -819.2) deg,
+// used only while SCCM_steeringAngleValidity (30|2) is VALID — fsd_steer.h.
+void fsd_handle_steering_angle(FSDState *state, const CanFrame *frame, uint32_t now_ms) {
+    fsd_steer_update(state, frame->data, frame->dlc, now_ms);
 }
 
 void fsd_handle_esp_status(FSDState *state, const CanFrame *frame) {
@@ -851,25 +970,46 @@ void fsd_handle_bms_hv(FSDState *state, const CanFrame *frame) {
     state->bms_seen = true;
 }
 
+// SOC: BMS_socUI, bit 10|10, 0.1 %, refused above 100 (fsd_logic/fsd_bms.h,
+// shared with the Flipper). Not the car's screen figure: that is 0x33A below.
 void fsd_handle_bms_soc(FSDState *state, const CanFrame *frame) {
-    if (frame->dlc < 3) return;
-    // Car display SOC: SOCUI292, bit10|10, LSB = 0.1 %.
-    uint16_t raw =
-        (((uint16_t)frame->data[SIG_BMS_SOC_UI_HIGH_BYTE] << (8 - SIG_BMS_SOC_UI_LOW_SHIFT)) |
-         (frame->data[SIG_BMS_SOC_UI_LOW_BYTE] >> SIG_BMS_SOC_UI_LOW_SHIFT)) &
-        SIG_BMS_SOC_UI_MASK;
-    state->soc_percent = raw * SIG_BMS_SOC_SCALE;
-    state->bms_seen = true;
+    fsd_bms_soc_update(state, frame->data, frame->dlc);
 }
 
-void fsd_handle_bms_thermal(FSDState *state, const CanFrame *frame) {
+// Car-displayed SOC (0x33A UI_range, bit 20, 7 bits, #251): read-only, kept apart
+// from soc_percent (0x292) — fsd_logic/fsd_bms.h.
+void fsd_handle_ui_range(FSDState *state, const CanFrame *frame) {
+    fsd_bms_ui_soc_update(state, frame->data, frame->dlc);
+}
+
+// Pack temperature: byte4/byte5 − 40 °C, layout unconfirmed, plausibility-gated
+// (fsd_logic/fsd_bms.h, shared with the Flipper).
+void fsd_handle_bms_thermal(FSDState *state, const CanFrame *frame, uint32_t now_ms) {
+    fsd_bms_thermal_update(state, frame->data, frame->dlc, now_ms);
+}
+
+// ── Wheel-speeds read-only parser (0x175 ESP_wheelSpeeds, Party CAN) ──────────
+// Four 13-bit LE fields in the 64-bit data word, factor 0.04 km/h. Read-only;
+// feeds the dashboard wheel-slip read-out. The frame carries a CRC we don't
+// model, so instead of a checksum we drop any sample with a field at/above the
+// full-scale SNA value — a cheap plausibility gate for a display metric.
+void fsd_handle_wheel_speeds(FSDState *state, const CanFrame *frame) {
     if (frame->dlc < 6) return;
-    // Temperatures: raw byte − 40 = °C
-    state->batt_temp_min_c = (int8_t)((int)frame->data[SIG_BMS_TEMP_MIN_BYTE] -
-                                      SIG_BMS_TEMP_OFFSET);
-    state->batt_temp_max_c = (int8_t)((int)frame->data[SIG_BMS_TEMP_MAX_BYTE] -
-                                      SIG_BMS_TEMP_OFFSET);
-    state->bms_seen = true;
+    uint64_t w = 0;
+    for (int i = 0; i < 8; i++) w |= (uint64_t)frame->data[i] << (8 * i);
+    uint16_t fl = (uint16_t)((w >> SIG_ESP_WHEELSPD_FL_SHIFT) & SIG_ESP_WHEELSPD_MASK);
+    uint16_t fr = (uint16_t)((w >> SIG_ESP_WHEELSPD_FR_SHIFT) & SIG_ESP_WHEELSPD_MASK);
+    uint16_t rl = (uint16_t)((w >> SIG_ESP_WHEELSPD_RL_SHIFT) & SIG_ESP_WHEELSPD_MASK);
+    uint16_t rr = (uint16_t)((w >> SIG_ESP_WHEELSPD_RR_SHIFT) & SIG_ESP_WHEELSPD_MASK);
+    float fl_k = fl * SIG_ESP_WHEELSPD_SCALE, fr_k = fr * SIG_ESP_WHEELSPD_SCALE;
+    float rl_k = rl * SIG_ESP_WHEELSPD_SCALE, rr_k = rr * SIG_ESP_WHEELSPD_SCALE;
+    if (fl_k >= SIG_ESP_WHEELSPD_MAX_KPH || fr_k >= SIG_ESP_WHEELSPD_MAX_KPH ||
+        rl_k >= SIG_ESP_WHEELSPD_MAX_KPH || rr_k >= SIG_ESP_WHEELSPD_MAX_KPH) return;
+    state->wheel_speed_fl_kph = fl_k;
+    state->wheel_speed_fr_kph = fr_k;
+    state->wheel_speed_rl_kph = rl_k;
+    state->wheel_speed_rr_kph = rr_k;
+    state->wheel_speed_seen = true;
 }
 
 // ── Precondition trigger ──────────────────────────────────────────────────────
@@ -1140,5 +1280,34 @@ bool fsd_build_gear_lever_frame(CanFrame *frame, uint8_t gear_pos, uint8_t count
     frame->data[1] = (uint8_t)((gear_pos << SIG_GEAR_LEVER_POS_SHIFT) | counter);
     frame->data[2] = 0x00u;
     frame->data[0] = NEUTRAL_CRC_BY_COUNTER[counter] ^ POSITION_CRC_XOR[gear_pos];
+    return true;
+}
+
+// ── Charge-port type (CP_status 0x25D, Vehicle CAN, #228) ────────────────────
+// Read-only decode is always on; the rewrite is opt-in and goes through the
+// standard transmit gate. The plug state comes out of the same frame we would
+// copy, so it is never stale, and the rewrite is held unless that frame says the
+// car is unplugged (fail closed on an unknown plug state). The 6-byte 0x25D on
+// Party CAN decodes to nothing (dlc != 8). Idea + on-car validation:
+// @Tesla234987234sdf, discussion #228.
+bool fsd_handle_cp_type_rewrite(FSDState *state, CanFrame *frame, uint32_t now_ms) {
+    if (frame->dlc != 8) return false;   // short / 6-byte 0x25D: not CP_status
+
+    // Read-only decode (every mode, toggle-independent) so the dashboard shows
+    // the car's own charge-port type and plug state.
+    state->cp_type        = fsd_cp_type_value(frame->data[0]);
+    state->cp_plug_state  = (uint8_t)fsd_cp_plug_state(frame->data);
+    state->cp_status_seen = true;
+    state->cp_status_ms   = now_ms;
+
+    if (!state->cp_type_eu_rewrite || !fsd_can_transmit(state)) return false;
+    // Only a genuine US-type frame is eligible — never echo an already-EU frame
+    // or touch a non-US variant.
+    if (!fsd_cp_type_rewrite_eligible(frame->data, frame->dlc)) return false;
+    // Plug guard: no rewrite while a cable is present / charging, and fail closed
+    // when the plug state is unknown.
+    if (state->cp_plug_state != FSD_CP_PLUG_UNPLUGGED) return false;
+
+    frame->data[0] = fsd_cp_type_make_iec_ccs(frame->data[0]);
     return true;
 }

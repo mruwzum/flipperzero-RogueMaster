@@ -9,6 +9,7 @@
 #include "evidence_pack.h"
 #include "guided_audit.h"
 #include "config_ap_layout.h"
+#include "oui_lookup.h"
 #include <gui/view_dispatcher.h>
 #include <gui/scene_manager.h>
 #include <gui/modules/submenu.h>
@@ -37,8 +38,8 @@
 // 5Ghost branding / update detection (task11). Keep GHOST_APP_VERSION in sync with
 // fap_version in application.fam. GHOST_LATEST_FW is the newest BW16 firmware the FAP
 // knows about; an official module reporting an older fw triggers the update hint.
-#define GHOST_APP_VERSION "2.7.6"
-#define GHOST_LATEST_FW   "2.7.3" // board firmware; FAP-only bump must not lockstep this
+#define GHOST_APP_VERSION "2.8.1"
+#define GHOST_LATEST_FW   "2.7.4" // board firmware; FAP-only bump must not lockstep this
 #define GHOST_BRAND_URL   "github.com/pingequalab/5ghost-wifi-lab"
 
 #define WEP_ENABLED      0x0001
@@ -70,11 +71,18 @@ typedef enum {
     handshakeSelectScene, // 5Ghost P2: LISTAP sweep + pick target AP for handshake
     handshakeCaptureScene, // 5Ghost P2: deauth-triggered 4-way capture -> PCAP on SD
     channelAnalyzerScene, // 5Ghost P8: 2.4GHz channel-congestion view
+    bleMenuScene, // BLE hub: Scan nearby / Nearby n / Saved. Does not scan.
     bleScanScene, // 5Ghost P6: BLESCAN sweep (loading) -> BLE device list
     bleListScene, // 5Ghost P6: BLE device list (Flipper / Find My tracker / plain)
     bleInfoScene, // 5Ghost P6: single BLE device detail (type/MAC/RSSI/vendor/name)
     gattProbeScene, // 5Ghost ②: GATT active recon (BLEGATTPROBE), triggered from BLE detail OK
     bleRawScene, // 5Ghost ③: raw-advert view (hex + AD breakdown), triggered from BLE detail Right
+    bleAdvLibScene, // issue #7: saved legacy adverts + Custom hex + Delete
+    bleAdvDelScene, // issue #7: pick one saved advert to delete
+    bleAdvDelAskScene, // issue #7: confirm that delete
+    bleAdvHexScene, // issue #7: type one even hex payload (1..31 bytes)
+    bleAdvDurScene, // issue #7: 30/60/120 s, same choices as iBeacon
+    bleAdvRunScene, // issue #7: send BLEADV, Back sends STOP
     staListScene, // 5Ghost FUNC-A: WiFi station (client) list for the selected AP
     pmkidSelectScene, // 5Ghost B3: LISTAP sweep + pick target AP for clientless PMKID (all bands)
     pmkidCaptureScene, // 5Ghost B3: send PMKID, stream on/st/ok/fail -> .22000 + quality gate
@@ -86,9 +94,20 @@ typedef enum {
     badbleRunScene, // 5Ghost ⑧b: send BADBLE, show CCCD-gated injection progress, OK=restart
     auditSelectScene, // P1 Guided Audit: pick AP from cached LISTAP (no TX in A1)
     auditRunScene, // P1 Guided Audit: run/result on one widget (A1 shell, no UART)
+    wifiMenuScene, // Scan Wi-Fi hub. Does not scan. Scan now / AP list / map / audit / captures.
 
     Ghost5SceneCount
 } Ghost5Scene;
+
+// Item ids for the Scan Wi-Fi hub. submenu_set_selected_item matches these, not the visual row.
+enum {
+    WifiHubScan = 0,
+    WifiHubList = 1,
+    WifiHubMap = 2,
+    WifiHubAudit = 3,
+    WifiHubHandshake = 4,
+    WifiHubPmkid = 5,
+};
 
 //Vistas APP
 typedef enum {
@@ -264,47 +283,57 @@ typedef struct {
 char credentials[1000];
 char message[128];
 char ev_last[96]; // 5Ghost: latest captured credential, handed worker -> main thread
-#define GHOST_EVT_EV_CRED               0x204u
-    // EV: a credential was captured; defer SD write + GUI to main thread
-#define GHOST_EVT_LOAD_PORTAL           0x205u
-    // task10: open the SD file browser from the dispatcher loop, not the input callback
-#define GHOST_EVT_SPLASH_TICK           0x206u
-    // startup splash timer tick: drive the progress bar / HELLO probe
-#define GHOST_EVT_CONFIG_AP_REBUILD     0x20Au
-    // rebuild Create AP after a dynamic item callback has returned
-#define GHOST_EVT_CONFIG_ATTACK_REBUILD 0x20Bu
-    // rebuild attack config after a dynamic item callback has returned
-#define GHOST_EVT_CONFIG_AP_START       0x20Cu
-    // send AP commands after the VariableItemList input callback has returned
-#define GHOST_EVT_GATT_PROBE            0x20Du
+#define GHOST_EVT_EV_CRED \
+    0x204u // EV: a credential was captured; defer SD write + GUI to main thread
+#define GHOST_EVT_LOAD_PORTAL \
+    0x205u // task10: open the SD file browser from the dispatcher loop, not the input callback
+#define GHOST_EVT_SPLASH_TICK \
+    0x206u // startup splash timer tick: drive the progress bar / HELLO probe
+#define GHOST_EVT_CONFIG_AP_REBUILD \
+    0x20Au // rebuild Create AP after a dynamic item callback has returned
+#define GHOST_EVT_CONFIG_ATTACK_REBUILD \
+    0x20Bu // rebuild attack config after a dynamic item callback has returned
+#define GHOST_EVT_CONFIG_AP_START \
+    0x20Cu // send AP commands after the VariableItemList input callback has returned
+#define GHOST_EVT_GATT_PROBE 0x20Du
     // 5Ghost ②: BLE detail card OK -> gattProbeScene (input callback
     // only posts the event; the scene's on_event does the next_scene)
-#define GHOST_EVT_BLE_RAW               0x20Eu
+#define GHOST_EVT_BLE_RAW    0x20Eu
 // 5Ghost ③: BLE detail card Right -> bleRawScene (posted from the
 // input callback; the scene's on_event does the next_scene)
-#define GHOST_EVT_BADBLE_LOAD_FILE      0x20Fu
-// 5Ghost ⑧b: open the SD .txt browser from the dispatcher loop, not the input callback
-#define GHOST_EVT_BADBLE_LOAD_PRESET    0x210u
-// 5Ghost ⑧b: upload the selected built-in preset (paced UART)
-#define GHOST_EVT_BADBLE_START          0x211u // 5Ghost ⑧b: send BADBLE after the input callback returns
-#define GHOST_EVT_BADBLE_UPDATE         0x212u // 5Ghost ⑧b: a BADBLE:START/INJECT/heartbeat line arrived
-#define GHOST_EVT_BADBLE_DONE           0x213u // 5Ghost ⑧b: BADBLE:OK — injection window finished
-#define GHOST_EVT_BADBLE_STOP           0x214u
-// 5Ghost ⑧b: run scene OK pressed while running -> send STOP (abort the fw inject window)
-#define GHOST_EVT_MULTI_DEAUTH_START    0x215u
+#define GHOST_EVT_BADBLE_LOAD_FILE \
+    0x20Fu // 5Ghost ⑧b: open the SD .txt browser from the dispatcher loop, not the input callback
+#define GHOST_EVT_BADBLE_LOAD_PRESET \
+    0x210u // 5Ghost ⑧b: upload the selected built-in preset (paced UART)
+#define GHOST_EVT_BADBLE_START  0x211u // 5Ghost ⑧b: send BADBLE after the input callback returns
+#define GHOST_EVT_BADBLE_UPDATE 0x212u // 5Ghost ⑧b: a BADBLE:START/INJECT/heartbeat line arrived
+#define GHOST_EVT_BADBLE_DONE   0x213u // 5Ghost ⑧b: BADBLE:OK — injection window finished
+#define GHOST_EVT_BADBLE_STOP \
+    0x214u // 5Ghost ⑧b: run scene OK pressed while running -> send STOP (abort the fw inject window)
+#define GHOST_EVT_MULTI_DEAUTH_START 0x215u
 // 5Ghost MULTI-AP C2: scan-list Left-long -> send the paced STOP/DEAUTHADD×N/DEAUTHRUN
 // sequence from the dispatcher loop, not the ViewPort input callback (ViewPort lock)
-#define GHOST_EVT_AUDIT_TICK            0x216u
-// P1 A2: 500ms wait tick for LISTAP/STASCAN/CAPTURE dwell (no dispatcher-blocking while)
-// P1 A2: 500ms wait tick for LISTAP/STASCAN/CAPTURE dwell (no dispatcher-blocking while)
-#define AUDIT_TICK_MS                   500
-#define AUDIT_LISTAP_TICKS              50
-#define AUDIT_STASCAN_TICKS             24
-#define AUDIT_CAPTURE_TICKS             30 // 15s dwell then CAPSTOP; firmware has no host timeout
-#define AUDIT_WAIT_NONE                 0
-#define AUDIT_WAIT_LISTAP               1
-#define AUDIT_WAIT_STASCAN              2
-#define AUDIT_WAIT_CAPTURE              3
+#define GHOST_EVT_AUDIT_TICK \
+    0x216u // P1 A2: 500ms wait tick for LISTAP/STASCAN/CAPTURE dwell (no dispatcher-blocking while)
+#define GHOST_EVT_BLEADV_SAVE 0x217u // issue #7: raw view OK -> append this advert to SD
+#define GHOST_EVT_BLEADV_OPEN 0x218u // issue #7: raw view Left -> saved-advert library
+#define GHOST_EVT_BLEADV_HEX  0x219u // issue #7: custom-hex text input committed
+#define GHOST_EVT_BLEADV_DONE 0x21Au // issue #7: BLEADVTX:OK
+#define GHOST_EVT_BLEADV_FAIL 0x21Bu // issue #7: firmware replied ERR:UNKNOWN to BLEADV
+#define GHOST_EVT_BLEADV_DEL  0x21Cu // issue #7: confirm-delete OK -> rewrite bleadv.txt
+#define GHOST_EVT_SSID_TICK \
+    0x21Du // scan-list / AP-detail SSID marquee. Timer callback only posts this.
+#define GHOST_SSID_TICK_MS     160 // UI cadence, not a radio timing. Tune on device.
+#define GHOST_SSID_SCROLL_STEP 1 // 1px/160ms (~6px/s); was 2px/100ms (~20px/s)
+#define GHOST_SSID_SCROLL_GAP  24 // px-times held at the start and at the end before moving
+#define AUDIT_TICK_MS          500
+#define AUDIT_LISTAP_TICKS     50
+#define AUDIT_STASCAN_TICKS    24
+#define AUDIT_CAPTURE_TICKS    30 // 15s dwell then CAPSTOP; firmware has no host timeout
+#define AUDIT_WAIT_NONE        0
+#define AUDIT_WAIT_LISTAP      1
+#define AUDIT_WAIT_STASCAN     2
+#define AUDIT_WAIT_CAPTURE     3
 
 // 5Ghost firmware handshake status (L1 text handshake)
 typedef enum {
@@ -357,7 +386,8 @@ typedef struct Ghost5App {
     bool ble_scan_timed_out; // last BLESCAN returned no BLE:OK in time
     bool ble_exported; // CSV written once per fresh BLE scan
     bool ble_filter_alarms; // 阶段1: BLE list view — false=all devices, true=alarms only (F/A)
-    bool ble_accumulate; // 5Ghost FUNC-C: next bleScanScene merges into the list (Right = re-scan) vs. clears (menu entry)
+    bool ble_accumulate; // 5Ghost FUNC-C: next bleScanScene merges into the list (Right = re-scan) vs. clears (Scan nearby)
+    bool ble_sweep_done; // a BLESCAN finished this app session; shows the Nearby n row
     int selectedBle; // 5Ghost P6: selected BLE device index for the detail page
     // 5Ghost FUNC-A: per-AP station (client) scan results (fixed-width rows, one free()).
     StaDetails* staList;
@@ -400,6 +430,9 @@ typedef struct Ghost5App {
     // 5Ghost task9: SD export state
     bool scan_exported; // CSV written once per fresh scan
     bool scan_timed_out; // last LISTAP returned no SCAN:OK in time (module not responding)
+    bool wifi_sweep_done; // this session received SCAN:OK, including 0 APs. Timeout does not set it.
+    uint32_t
+        wifi_hub_sel; // hub row to restore after a child scene. Home entry resets it to Scan now.
     volatile bool phtml_ok; // task10: firmware ACKed a custom-portal upload (PHTMLOK)
     bool custom_portal_ready; // true only after this app session uploads every chunk with ACK
     bool custom_portal_load_failed; // distinguishes an upload/read failure from never selected
@@ -419,6 +452,16 @@ typedef struct Ghost5App {
     bool badble_last_fallback; // run scene: last inject was the 8s fallback (vs cccd-ready)
     int badble_conn; // run scene: last heartbeat conn flag
     int badble_notify_ready; // run scene: last heartbeat CCCD-ready flag
+    // issue #7: one legacy advert to replay. hex is even uppercase nybbles, 2..62 chars.
+    // label is display-only (device name or MAC, or "Custom"). app is malloc'd, not zeroed.
+    char bleadv_hex[64];
+    char bleadv_label[20];
+    int bleadv_secs;
+    bool bleadv_waiting; // BLEADV is in flight; ERR:UNKNOWN is reported instead of ignored
+    bool bleadv_done; // BLEADVTX:OK seen
+    bool bleadv_unsupported; // this firmware image has no BLEADV verb
+    char bleadv_note[20]; // raw-view status: Saved / Full / No raw
+    int bleadv_del; // index into bleadv_slots while the delete confirm is up
     GhostConfigApLayout config_ap_layout; // exact action rows for the currently rendered AP form
     char creds_path[80]; // per-session captured-credentials file ("" until first capture)
     // 5Ghost P2: handshake capture state. Frames stream in from the firmware as hex
@@ -434,7 +477,7 @@ typedef struct Ghost5App {
     bool hs_have_beacon; // beacon captured (carries the SSID into the PCAP)
     bool hs_done; // HSDONE received -> capture finished
     bool hs_stopping; // Back pressed: CAPSTOP sent, staying on-scene until HSDONE flushes
-    char hs_path[96]; // path of the written PCAP (valid after a successful flush)
+    char hs_path[128]; // path of the written PCAP (valid after a successful flush)
     char hs_error[24]; // terminal HSERR reason, without the prefix
     char hs_ssid[36]; // target SSID, shown on the capture screen
     char hs_bssid[18]; // target BSSID "AA:BB:CC:DD:EE:FF"
@@ -449,7 +492,7 @@ typedef struct Ghost5App {
     bool pmkid_done; // terminal state reached (ok/fail/err)
     G5PmkidReport pmkid_report; // accumulated parse of the PMKID: lines (UART worker writes)
     G5PmkidState pmkid_state; // final classified state (after g5_pmkid_classify_ok)
-    char pmkid_path[96]; // path of the written .22000 (set only after a Valid flush)
+    char pmkid_path[128]; // path of the written .22000 (set only after a Valid flush)
     char pmkid_seen[8][18]; // BSSIDs already captured this session (Duplicate gate)
     int pmkid_seen_count;
     // Guided Audit / evidence pack: set at task start. Empty => each flush mints a
@@ -466,6 +509,7 @@ typedef struct Ghost5App {
     int audit_wait_ticks;
     int audit_wait_kind;
     FuriTimer* audit_timer;
+    FuriTimer* ssid_timer; // list + AP detail marquee; callback only posts GHOST_EVT_SSID_TICK
 } Ghost5App;
 
 // Menu options
@@ -629,16 +673,21 @@ static const char* ghost_ui_sec_full(int security) {
 // identity comes from the ghost mark + clean type + functional data glyphs (signal/lock).
 
 // Light header: bold title (FontPrimary) + a thin rule, optional right-aligned stat. No fill.
-static void ghost_ui_header(Canvas* canvas, const char* title, const char* stat) {
+static void ghost_ui_header_rule(Canvas* canvas, const char* stat) {
     canvas_set_color(canvas, ColorBlack);
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 9, title);
     if(stat && stat[0]) {
         canvas_set_font(canvas, FontSecondary);
         int sw = canvas_string_width(canvas, stat);
         canvas_draw_str(canvas, 123 - sw, 9, stat); // right margin so the last glyph isn't clipped
     }
     canvas_draw_line(canvas, 0, 12, 127, 12);
+}
+
+static void ghost_ui_header(Canvas* canvas, const char* title, const char* stat) {
+    canvas_set_color(canvas, ColorBlack);
+    canvas_set_font(canvas, FontPrimary);
+    if(title) canvas_draw_str(canvas, 2, 9, title);
+    ghost_ui_header_rule(canvas, stat);
 }
 
 // (v1 traditional simplification: dropped the ghost cursor / ghost mascot / signal-bar
@@ -690,11 +739,16 @@ typedef struct {
     Ghost5App* app; // live wifiList / wifiCount / scan_timed_out for the draw callback
     int sel; // selected AP index
     int top; // first visible row index
+    // Focus-row SSID marquee. malloc'd with the view model (not zeroed). Only the
+    // Wi-Fi scan list reads it; BLE/GATT/STA views reuse ListModel and must not.
+    uint16_t ssid_px;
 } ListModel;
 
 // AP detail card model. Reads the selected AP live so a deauth toggle redraws in place.
 typedef struct {
     Ghost5App* app;
+    // Title marquee. Only ghost_info_draw_callback reads it; ble_info reuses InfoModel.
+    uint16_t ssid_px;
 } InfoModel;
 
 // Catalog requires writes under /ext/apps_data/<appid>/. Keep the literal path (not /data)
@@ -705,6 +759,13 @@ typedef struct {
 static void ghost_ensure_data_dir(Storage* storage) {
     storage_simply_mkdir(storage, "/ext/apps_data");
     storage_simply_mkdir(storage, GHOST_DATA_DIR);
+    // New writes land in type folders. Flat files already in GHOST_DATA_DIR stay put.
+    storage_simply_mkdir(storage, GHOST_DATA_DIR "/scans");
+    storage_simply_mkdir(storage, GHOST_DATA_DIR "/handshakes");
+    storage_simply_mkdir(storage, GHOST_DATA_DIR "/pmkid");
+    storage_simply_mkdir(storage, GHOST_DATA_DIR "/audits");
+    storage_simply_mkdir(storage, GHOST_DATA_DIR "/creds");
+    storage_simply_mkdir(storage, GHOST_DATA_DIR "/ble");
 }
 
 // Move leftover 2.7.5 files before any mkdir/seed of the new dir. migrate copies then
@@ -797,6 +858,82 @@ static void ghost_seed_portals(void) {
     storage_dir_close(dir);
     storage_file_free(dir);
     furi_record_close(RECORD_STORAGE);
+}
+
+// Copy the bundled starter table into apps_data once. storage_common_copy
+// returns FSE_EXIST when the SD file is already there, so a user edit stays.
+// A missing asset is ignored; lookup then shows no vendor.
+#define GHOST_OUI_ASSET    "/ext/apps_assets/5ghost_wifi_lab/oui.txt"
+#define GHOST_OUI_PATH     GHOST_DATA_DIR "/oui.txt"
+#define GHOST_OUI_READ_MAX 32768u
+
+static void ghost_seed_oui(void) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    storage_simply_mkdir(storage, GHOST_DATA_DIR);
+    storage_common_copy(storage, GHOST_OUI_ASSET, GHOST_OUI_PATH);
+    furi_record_close(RECORD_STORAGE);
+}
+
+// Once per launch, not from a draw callback. A missing or unreadable file
+// leaves the table empty. Reads stop at 32KB or G5_OUI_MAX records.
+static void ghost_oui_load(void) {
+    g5_oui_reset();
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    File* file = storage_file_alloc(storage);
+    if(!storage_file_open(file, GHOST_OUI_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        storage_file_free(file);
+        furi_record_close(RECORD_STORAGE);
+        FURI_LOG_I(TAG, "oui: no table");
+        return;
+    }
+
+    char buf[128];
+    char line[160];
+    size_t ln = 0;
+    bool skip = false;
+    bool capped = false;
+    size_t seen = 0;
+    while(!capped && seen < GHOST_OUI_READ_MAX) {
+        size_t want = sizeof(buf);
+        if(GHOST_OUI_READ_MAX - seen < want) want = GHOST_OUI_READ_MAX - seen;
+        size_t nread = storage_file_read(file, buf, want);
+        if(nread == 0) break;
+        for(size_t i = 0; i < nread; i++) {
+            char c = buf[i];
+            seen++;
+            if(c == '\n' || c == '\r') {
+                if(!skip && ln > 0) {
+                    line[ln] = '\0';
+                    if(g5_oui_add_line(line) == G5OuiFull) capped = true;
+                }
+                ln = 0;
+                skip = false;
+                if(capped || seen >= GHOST_OUI_READ_MAX) break;
+                continue;
+            }
+            if(skip || capped) continue;
+            if(ln + 1 >= sizeof(line)) {
+                skip = true;
+                ln = 0;
+                continue;
+            }
+            line[ln++] = c;
+            if(seen >= GHOST_OUI_READ_MAX) break;
+        }
+        if(seen >= GHOST_OUI_READ_MAX) capped = true;
+    }
+    if(!capped && !skip && ln > 0) {
+        line[ln] = '\0';
+        g5_oui_add_line(line);
+    }
+    storage_file_close(file);
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+    FURI_LOG_I(TAG, "oui: %u", (unsigned)g5_oui_count());
+}
+
+static const char* wifi_oui_vendor(const char* mac) {
+    return g5_oui_lookup(mac);
 }
 
 static void ghost_portal_copy_basename(char* out, size_t out_size, const char* path) {
@@ -939,7 +1076,7 @@ static void ghost_export_scan_csv(Ghost5App* app) {
     snprintf(
         path,
         sizeof(path),
-        GHOST_DATA_DIR "/scan_%04d%02d%02d_%02d%02d%02d.csv",
+        GHOST_DATA_DIR "/scans/scan_%04d%02d%02d_%02d%02d%02d.csv",
         dt.year,
         dt.month,
         dt.day,
@@ -990,7 +1127,7 @@ static void ghost_save_cred(Ghost5App* app, const char* cred) {
         snprintf(
             app->creds_path,
             sizeof(app->creds_path),
-            GHOST_DATA_DIR "/creds_%04d%02d%02d_%02d%02d%02d.txt",
+            GHOST_DATA_DIR "/creds/creds_%04d%02d%02d_%02d%02d%02d.txt",
             dt.year,
             dt.month,
             dt.day,
@@ -1201,6 +1338,98 @@ static bool
     return g5_audit_join_path(GHOST_DATA_DIR, base, out, cap) > 0;
 }
 
+// ghost_evidence_atomic_write appends ".tmp" into a 112-byte stack buffer.
+static bool ghost_path_fits_evidence(const char* path) {
+    return path && path[0] && strlen(path) + 4 < 112;
+}
+
+static G5AuditFileKind ghost_capture_sibling(G5AuditFileKind kind) {
+    switch(kind) {
+    case G5AuditFileCapturePcap:
+        return G5AuditFileCaptureJson;
+    case G5AuditFileCaptureJson:
+        return G5AuditFileCapturePcap;
+    case G5AuditFilePmkid22000:
+        return G5AuditFilePmkidJson;
+    case G5AuditFilePmkidJson:
+        return G5AuditFilePmkid22000;
+    case G5AuditFileAuditJson:
+        return kind;
+    }
+    return kind;
+}
+
+// Flat GHOST_DATA_DIR file from 2.8.0 and earlier. A sibling counts: the pcap and
+// its JSON stay in the same layout.
+static bool
+    ghost_legacy_capture_exists(Storage* storage, G5AuditFileKind kind, const char* session_id) {
+    char path[112];
+    if(!storage) return false;
+    if(ghost_session_path(path, sizeof(path), kind, session_id) &&
+       storage_file_exists(storage, path))
+        return true;
+    const G5AuditFileKind sibling = ghost_capture_sibling(kind);
+    if(sibling == kind) return false;
+    if(!ghost_session_path(path, sizeof(path), sibling, session_id)) return false;
+    return storage_file_exists(storage, path);
+}
+
+static bool ghost_typed_capture_path(
+    char* out,
+    size_t cap,
+    G5AuditFileKind kind,
+    const char* session_id,
+    const char* ssid) {
+    const char* sub = g5_audit_kind_subdir(kind);
+    if(!sub) return false;
+    char base[G5_AUDIT_BASENAME_MAX];
+    if(g5_audit_capture_basename(kind, session_id, ssid, base, sizeof(base)) == 0) return false;
+    char dir[64];
+    const int n = snprintf(dir, sizeof(dir), "%s/%s", GHOST_DATA_DIR, sub);
+    if(n <= 0 || (size_t)n >= sizeof(dir)) return false;
+    if(g5_audit_join_path(dir, base, out, cap) == 0) return false;
+    if(!ghost_path_fits_evidence(out)) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+// New captures go to a type subfolder and, when the SSID sanitizes, include that
+// slug next to the session id. An existing flat file for this session is reused
+// so a card written by an older build is not split across two layouts.
+static bool ghost_capture_dest(
+    Storage* storage,
+    char* out,
+    size_t cap,
+    G5AuditFileKind kind,
+    const char* session_id,
+    const char* ssid) {
+    if(ghost_legacy_capture_exists(storage, kind, session_id) &&
+       ghost_session_path(out, cap, kind, session_id) && ghost_path_fits_evidence(out))
+        return true;
+    if(ghost_typed_capture_path(out, cap, kind, session_id, ssid)) return true;
+    if(!ghost_session_path(out, cap, kind, session_id) || !ghost_path_fits_evidence(out)) {
+        if(out && cap) out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+static const char* ghost_path_basename(const char* path) {
+    const char* slash = path ? strrchr(path, '/') : NULL;
+    return (slash && slash[1]) ? slash + 1 : path;
+}
+
+static bool ghost_store_basename(char* out, size_t cap, const char* path) {
+    const char* base = ghost_path_basename(path);
+    if(!out || cap == 0 || !base || !base[0]) return false;
+    const size_t n = strlen(base);
+    if(n + 1 > cap) return false;
+    memcpy(out, base, n + 1);
+    return true;
+}
+
 // Finalize a capture on the main thread. A valid result is a two-file evidence
 // pack (PCAP + JSON metadata); either both commit or the PCAP is rolled back.
 // Partial/invalid captures write JSON only and never masquerade as a handshake.
@@ -1216,8 +1445,15 @@ static bool ghost_hs_flush(Ghost5App* app) {
     char pcap_path[112];
     char json_path[112];
     if(!ghost_resolve_session_id(app, session_id, sizeof(session_id)) ||
-       !ghost_session_path(pcap_path, sizeof(pcap_path), G5AuditFileCapturePcap, session_id) ||
-       !ghost_session_path(json_path, sizeof(json_path), G5AuditFileCaptureJson, session_id)) {
+       !ghost_capture_dest(
+           storage, pcap_path, sizeof(pcap_path), G5AuditFileCapturePcap, session_id, app->hs_ssid) ||
+       !ghost_capture_dest(
+           storage,
+           json_path,
+           sizeof(json_path),
+           G5AuditFileCaptureJson,
+           session_id,
+           app->hs_ssid)) {
         furi_record_close(RECORD_STORAGE);
         return false;
     }
@@ -1355,22 +1591,15 @@ typedef struct {
     char required_cap; // 0 = always shown; else gated on this caps bit
 } HomeItem;
 
-// Ordering = recon-first, moat-forward (user product call 2026-07-01): passive recon at the
-// top (Scan / BLE / Channel), active/attack below (Handshake / Beacon / AP), About last.
-// BLE Scan is a moat feature (bare Flipper can't scan BLE) so it's promoted to row 2.
+// Ordering = recon-first. Scan Wi-Fi opens a hub (it does not scan by itself). Channel Map,
+// Guided Audit, Handshake and PMKID live in that hub because they all read one LISTAP table.
+// Send Beacon and Create AP stay here: they do not read that table.
 // Order is display-only: input dispatch keys off HomeItem.target, not array index — safe to reorder.
-// Scan + List merged into one "Scan Wi-Fi" (scans, then goes straight to the results list).
 static const HomeItem home_items[] = {
     {"Scan Wi-Fi", ScanWifi, 0},
-    {"BLE Scan",
-     BleScan,
-     'L'}, // P6: BLE detector (Flipper + Find My tracker); hidden unless caps 'L'
+    {"BLE", BleScan, 'L'}, // detector + saved-advert replay; hidden unless caps 'L'
     {"iBeacon Spoof", IBeaconSpoof, 'I'}, // ⑦b: broadcast a custom iBeacon; hidden unless caps 'I'
     {"BadBLE HID", BadBleHid, 'K'}, // ⑧b: BLE HID keystroke injection; hidden unless caps 'K'
-    {"Channel Map", ChannelAnalyzer, 0},
-    {"Guided Audit", GuidedAudit, 'H'},
-    {"Capture Handshake", CaptureHandshake, 'H'},
-    {"Capture PMKID", CapturePmkid, 'H'},
     {"Send Beacon", CustomBeacon, 0},
     {"Create AP", CreateAP, 'E'}, // P4 BP-7: evil/AP needs E cap (P3); hidden under DSB fw
     {"About 5Ghost", Help, 0},
@@ -1497,7 +1726,8 @@ static bool ghost_home_input_callback(InputEvent* event, void* context) {
         app->home_target = home_items[vis[sel]].target;
         switch(home_items[vis[sel]].target) {
         case ScanWifi:
-            scene_manager_next_scene(app->scene_manager, scanNetworksScene);
+            app->wifi_hub_sel = WifiHubScan;
+            scene_manager_next_scene(app->scene_manager, wifiMenuScene);
             break;
         case ChannelAnalyzer:
             scene_manager_next_scene(app->scene_manager, channelAnalyzerScene);
@@ -1518,9 +1748,7 @@ static bool ghost_home_input_callback(InputEvent* event, void* context) {
             scene_manager_next_scene(app->scene_manager, configAPScene);
             break;
         case BleScan:
-            app->ble_accumulate =
-                false; // 5Ghost FUNC-C: menu entry = fresh BLE session (clear prior list)
-            scene_manager_next_scene(app->scene_manager, bleScanScene);
+            scene_manager_next_scene(app->scene_manager, bleMenuScene);
             break;
         case IBeaconSpoof:
             scene_manager_next_scene(app->scene_manager, ibeaconDurationScene);
@@ -1648,11 +1876,21 @@ void main_menu_scene_on_exit(void* context) {
     Ghost5App* app = context;
     furi_timer_stop(app->splash_timer);
 }
+// A new LISTAP frees the table, so the hub must not offer "AP list" until SCAN:OK.
+static void ghost_wifi_sweep_begin(Ghost5App* app) {
+    app->wifi_sweep_done = false;
+}
+
+static void ghost_wifi_sweep_finish(Ghost5App* app) {
+    app->wifi_sweep_done = (scanFinish == true);
+}
+
 void scan_networks_scene_on_enter(void* context) {
     FURI_LOG_D(TAG, __func__);
 
     Ghost5App* app = context;
     app->menuIndex = 0;
+    ghost_wifi_sweep_begin(app);
     for(int i = 0; i < app->wifiCount; i++) {
         free(app->wifiList[i].APssid);
     }
@@ -1685,9 +1923,9 @@ void scan_networks_scene_on_enter(void* context) {
     // 5Ghost task26: if SCAN:OK never came back the module isn't responding. Record it so
     // List Wifis can show timeout copy instead of a silent empty list. Not a 5V sensor.
     app->scan_timed_out = (scanFinish == false);
+    ghost_wifi_sweep_finish(app);
 
-    // Scan+List merged: go straight to the results list. Back from the list skips this
-    // loading/scan scene back to the home menu (see list_networks_scene_on_event).
+    // Straight to the results list. Back from the list skips this scene and returns to the hub.
     scene_manager_next_scene(app->scene_manager, listNetworksScene);
 }
 bool scan_networks_scene_on_event(void* context, SceneManagerEvent event) {
@@ -1729,6 +1967,82 @@ static void ghost_ui_ssid(const char* ssid, char* out, size_t out_sz) {
     out[j] = '\0';
 }
 
+// Pixel offset into a string wider than max_w. Holds at the start for
+// GHOST_SSID_SCROLL_GAP steps, scrolls the excess, holds at the end for the
+// same gap, then wraps. UI cadence only — not a radio timing.
+static int ghost_ui_scroll_off(int full_w, int max_w, uint16_t px) {
+    int excess = full_w - max_w;
+    if(excess <= 0 || max_w <= 0) return 0;
+    int span = excess + (GHOST_SSID_SCROLL_GAP * 2);
+    if(span <= 0) return 0;
+    int mod = (int)px % span;
+    if(mod < GHOST_SSID_SCROLL_GAP) return 0;
+    if(mod < GHOST_SSID_SCROLL_GAP + excess) return mod - GHOST_SSID_SCROLL_GAP;
+    return excess;
+}
+
+// Draw `text` inside [x, x+max_w). Glyphs that are not fully inside are skipped
+// so a marquee cannot paint the lock, RSSI, mesh tag, or the header stat.
+static void ghost_ui_draw_window(
+    Canvas* canvas,
+    int x,
+    int baseline,
+    int max_w,
+    const char* text,
+    uint16_t px) {
+    if(!text || !text[0] || max_w <= 0) return;
+    int full = canvas_string_width(canvas, text);
+    int off = ghost_ui_scroll_off(full, max_w, px);
+    int cx = x - off;
+    for(const char* p = text; *p; p++) {
+        char g[2] = {*p, '\0'};
+        int cw = canvas_string_width(canvas, g);
+        if(cw < 1) cw = 1;
+        if(cx >= x && cx + cw <= x + max_w) canvas_draw_str(canvas, cx, baseline, g);
+        cx += cw;
+        if(cx >= x + max_w) break;
+    }
+}
+
+// Chop `s` so it fits max_w, then append "...". No-op when it already fits.
+// Callers pass a 40-byte buffer. The 34-byte SSID slot holds 32 ASCII + NUL
+// and has no room for the dots.
+static void ghost_ui_fit_ellipsis(Canvas* canvas, char* s, size_t cap, int max_w) {
+    if(!s || cap == 0) return;
+    if(max_w <= 0) {
+        s[0] = '\0';
+        return;
+    }
+    if(canvas_string_width(canvas, s) <= max_w) return;
+    const int dots_w = canvas_string_width(canvas, "...");
+    if(dots_w > max_w) {
+        s[0] = '\0';
+        return;
+    }
+    size_t n = strlen(s);
+    while(n > 0 && canvas_string_width(canvas, s) + dots_w > max_w)
+        s[--n] = '\0';
+    if(n + 4 > cap) {
+        s[0] = '\0';
+        return;
+    }
+    memcpy(s + n, "...", 4);
+}
+
+static void ghost_ssid_timer_callback(void* context) {
+    Ghost5App* app = context;
+    view_dispatcher_send_custom_event(app->view_dispatcher, GHOST_EVT_SSID_TICK);
+}
+
+static void ghost_ssid_timer_stop(Ghost5App* app) {
+    if(app && app->ssid_timer) furi_timer_stop(app->ssid_timer);
+}
+
+static void ghost_ssid_timer_start(Ghost5App* app) {
+    if(app && app->ssid_timer)
+        furi_timer_start(app->ssid_timer, furi_ms_to_ticks(GHOST_SSID_TICK_MS));
+}
+
 // UART-INIT: empty-state copy for scan/BLE/STA. Not a 5V sensor.
 static void ghost_uart_empty_copy(
     Ghost5App* app,
@@ -1759,10 +2073,17 @@ static void ghost_list_draw_callback(Canvas* canvas, void* model) {
     canvas_set_color(canvas, ColorBlack);
 
     if(!app || app->wifiCount <= 0) {
-        const char* main_s;
-        const char* sub_s;
-        ghost_uart_empty_copy(
-            app, app && app->scan_timed_out, "No APs found", "Press OK to scan", &main_s, &sub_s);
+        // Wi-Fi list only. STA still uses ghost_uart_empty_copy and its "OK=retry" line.
+        const char* main_s = "No APs found";
+        const char* sub_s = "Right: scan";
+        if(app && app->uart_port_busy) {
+            main_s = "USART busy";
+            sub_s = "Listen UART=None";
+        } else if(app && app->scan_timed_out && app->fw_status == FwNoModule) {
+            main_s = "No UART reply";
+        } else if(app && app->scan_timed_out) {
+            main_s = "No response";
+        }
         ghost_ui_header(canvas, "Scan", NULL);
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignCenter, main_s);
@@ -1849,11 +2170,42 @@ static void ghost_list_draw_callback(Canvas* canvas, void* model) {
             }
             if(same > 1) snprintf(tag, sizeof(tag), " (%d)", idx);
         }
-        int namew = 110 - rw - 13 - (tag[0] ? canvas_string_width(canvas, tag) : 0);
-        while(name[0] && canvas_string_width(canvas, name) > namew)
-            name[strlen(name) - 1] = '\0';
-        canvas_draw_str(canvas, 13, yb, name);
-        if(tag[0]) canvas_draw_str(canvas, 13 + canvas_string_width(canvas, name), yb, tag);
+        int tag_w = tag[0] ? canvas_string_width(canvas, tag) : 0;
+        int full_w = canvas_string_width(canvas, name);
+        // Vendor before the RSSI. No vendor keeps the old name width (ends at 110-rw).
+        // Drop it when the SSID would have under 24px, so a long name still reads.
+        const char* vend = wifi_oui_vendor(ap->APbssid);
+        int vend_w = (vend && vend[0]) ? canvas_string_width(canvas, vend) : 0;
+        int avail = 110 - rw - 13;
+        int namew;
+        if(avail < 0) avail = 0;
+        if(vend_w > 0 && full_w + tag_w + 4 + vend_w <= avail) {
+            namew = full_w;
+        } else if(vend_w > 0 && avail - tag_w - 4 - vend_w >= 24) {
+            namew = avail - tag_w - 4 - vend_w;
+        } else {
+            vend_w = 0;
+            namew = avail - tag_w;
+        }
+        if(namew < 0) namew = 0;
+        // Focus row scrolls the full sanitized name. Other rows keep the old clip,
+        // but a clipped name now ends with "...". Short names and "<hidden>" are unchanged.
+        // `name` stays intact — the dots go in `fitted`, never strcat'd onto name[34].
+        if(sel && namew > 0 && full_w > namew) {
+            ghost_ui_draw_window(canvas, 13, yb, namew, name, m->ssid_px);
+            if(tag[0]) canvas_draw_str(canvas, 13 + namew, yb, tag);
+        } else {
+            char fitted[40];
+            strncpy(fitted, name, sizeof(fitted) - 1);
+            fitted[sizeof(fitted) - 1] = '\0';
+            if(namew > 0 && full_w > namew)
+                ghost_ui_fit_ellipsis(canvas, fitted, sizeof(fitted), namew);
+            else if(namew <= 0)
+                fitted[0] = '\0';
+            canvas_draw_str(canvas, 13, yb, fitted);
+            if(tag[0]) canvas_draw_str(canvas, 13 + canvas_string_width(canvas, fitted), yb, tag);
+        }
+        if(vend_w > 0) canvas_draw_str(canvas, 13 + namew + tag_w + 4, yb, vend);
 
         // MULTI-AP C2: a filled square at the right edge marks a ticked (selected) AP. Colour
         // follows the row (White on the inverted focus row, Black otherwise) so it reads on both;
@@ -1875,13 +2227,13 @@ static bool ghost_list_input_callback(InputEvent* event, void* context) {
        event->type != InputTypeLong)
         return false;
 
-    // empty/timeout state: OK re-runs the passive scan (task26 one-tap retry).
+    // Empty list: Right starts a sweep. OK does nothing. Back falls through to the scene.
     if(app->wifiCount <= 0) {
-        if(event->key == InputKeyOk && event->type == InputTypeShort) {
+        if(event->key == InputKeyRight && event->type == InputTypeShort) {
             scene_manager_next_scene(app->scene_manager, scanNetworksScene);
             return true;
         }
-        return false; // Back -> dispatcher -> previous scene
+        return false;
     }
 
     // MULTI-AP C2: while a multi-deauth round is running the list doubles as the running banner.
@@ -1941,9 +2293,7 @@ static bool ghost_list_input_callback(InputEvent* event, void* context) {
         return false; // Left repeat -> ignore (no double-fire)
     }
 
-    // Right = re-scan in place (R1): refresh the list without Back -> home ->
-    // Scan Wi-Fi. The merged "Scan Wi-Fi" is the only scan entry point, so this
-    // gives a one-key refresh from within the results. See UI_SCAN_LIST_MERGE_ANALYSIS.md.
+    // Right = clear and LISTAP again. Back from the new list returns to the Scan Wi-Fi hub.
     if(event->key == InputKeyRight && event->type == InputTypeShort) {
         scene_manager_next_scene(app->scene_manager, scanNetworksScene);
         return true;
@@ -1954,15 +2304,20 @@ static bool ghost_list_input_callback(InputEvent* event, void* context) {
         app->list_view,
         ListModel * m,
         {
-            if(event->key == InputKeyUp) {
-                if(m->sel > 0) m->sel--;
+            int prev = m->sel;
+            // wifiCount == 0 makes (wifiCount - 1) == -1. Leave sel/top alone.
+            if(app->wifiCount > 0 && event->key == InputKeyUp) {
+                m->sel = (m->sel > 0) ? m->sel - 1 : app->wifiCount - 1;
                 if(m->sel < m->top) m->top = m->sel;
+                if(m->sel >= m->top + GHOST_LIST_ROWS) m->top = m->sel - GHOST_LIST_ROWS + 1;
                 handled = true;
-            } else if(event->key == InputKeyDown) {
-                if(m->sel < app->wifiCount - 1) m->sel++;
+            } else if(app->wifiCount > 0 && event->key == InputKeyDown) {
+                m->sel = (m->sel < app->wifiCount - 1) ? m->sel + 1 : 0;
+                if(m->sel < m->top) m->top = m->sel;
                 if(m->sel >= m->top + GHOST_LIST_ROWS) m->top = m->sel - GHOST_LIST_ROWS + 1;
                 handled = true;
             }
+            if(handled && m->sel != prev) m->ssid_px = 0;
         },
         true);
     return handled; // Back/Left/Right unhandled -> dispatcher (Back = previous scene)
@@ -2062,19 +2417,30 @@ void list_networks_scene_on_enter(void* context) {
             if(m->sel < m->top) m->top = m->sel;
             if(m->sel >= m->top + GHOST_LIST_ROWS) m->top = m->sel - GHOST_LIST_ROWS + 1;
             if(m->top < 0) m->top = 0;
+            m->ssid_px = 0;
         },
         true);
     view_dispatcher_switch_to_view(app->view_dispatcher, wifiListView);
+    ghost_ssid_timer_start(app);
 }
 bool list_networks_scene_on_event(void* context, SceneManagerEvent event) {
     FURI_LOG_D(TAG, __func__);
     Ghost5App* app = context;
     if(event.type == SceneManagerEventTypeBack) {
-        // skip the loading/scan scene underneath us — go straight back to the home menu
-        scene_manager_search_and_switch_to_previous_scene(app->scene_manager, mainMenuScene);
+        // Skip the scan scene under this list. previous_scene would re-enter it and LISTAP again.
+        scene_manager_search_and_switch_to_previous_scene(app->scene_manager, wifiMenuScene);
         return true;
     }
     if(event.type == SceneManagerEventTypeCustom) {
+        // Marquee tick is its own id. It must not fall through into DEAUTHADD/DEAUTHRUN.
+        if(event.event == GHOST_EVT_SSID_TICK) {
+            with_view_model(
+                app->list_view,
+                ListModel * m,
+                { m->ssid_px = (uint16_t)(m->ssid_px + GHOST_SSID_SCROLL_STEP); },
+                true);
+            return true;
+        }
         // MULTI-AP C2: Left-long posted this from the input callback; run the paced deauth burst
         // here in the dispatcher loop (no ViewPort lock held).
         if(event.event == GHOST_EVT_MULTI_DEAUTH_START) multi_deauth_start(app);
@@ -2085,6 +2451,7 @@ bool list_networks_scene_on_event(void* context, SceneManagerEvent event) {
 void list_networks_scene_on_exit(void* context) {
     FURI_LOG_D(TAG, __func__);
     Ghost5App* app = context;
+    ghost_ssid_timer_stop(app);
     // MULTI-AP C2: never leave the scene with a multi-deauth still running in the firmware.
     // Back-short stops it in place (input callback); this covers every other exit path (Back-long,
     // OK -> detail card, a scene switch) so the radio can't keep hitting targets after the running
@@ -2275,10 +2642,6 @@ void info_wifi_button_press(GuiButtonType result, InputType type, void* context)
 // 5Ghost P8 UI redesign: AP detail card. Big SSID + band chip, lock + full security
 // + inverted PMF! chip (deauth-immune warning), channel + signal bars + RSSI, MAC, and
 // an Edit / Deauth / Evil button row. Own Canvas View (no longer shares app->widget).
-// FUNC-D: defined later alongside ble_vendor_name (with the OUI table); forward-
-// declared here because this AP detail card draws the vendor before that point.
-static const char* wifi_oui_vendor(const char* bssid);
-
 static void ghost_info_draw_callback(Canvas* canvas, void* model) {
     InfoModel* m = model;
     Ghost5App* app = m->app;
@@ -2293,8 +2656,9 @@ static void ghost_info_draw_callback(Canvas* canvas, void* model) {
     APDetails* ap = &app->wifiList[app->selectedWifi];
 
     // header: SSID (title) + a one-word threat verdict (right-aligned stat) that
-    // teaches the PMF->attack relationship (ghost_ui_threat_hint). Reserve the
-    // stat's width so a long SSID truncates instead of overlapping it.
+    // teaches the PMF->attack relationship (ghost_ui_threat_hint). A long name
+    // scrolls inside the same header band. A second line would cover the lock
+    // (y=17) and, if the body moved down, the Edit/Deauth/Evil buttons.
     char ssid[34];
     ghost_ui_ssid(ap->APssid, ssid, sizeof(ssid));
     if(!ssid[0]) strcpy(ssid, "<hidden>");
@@ -2304,10 +2668,15 @@ static void ghost_info_draw_callback(Canvas* canvas, void* model) {
         canvas_set_font(canvas, FontSecondary);
         stat_w = canvas_string_width(canvas, threat) + 6; // gap before the title
     }
+    int max_w = 122 - stat_w;
     canvas_set_font(canvas, FontPrimary);
-    while(ssid[0] && canvas_string_width(canvas, ssid) > 122 - stat_w)
-        ssid[strlen(ssid) - 1] = '\0';
-    ghost_ui_header(canvas, ssid, threat[0] ? threat : NULL);
+    int full_w = canvas_string_width(canvas, ssid);
+    if(max_w > 0 && full_w > max_w) {
+        ghost_ui_draw_window(canvas, 2, 9, max_w, ssid, m->ssid_px);
+        ghost_ui_header_rule(canvas, threat[0] ? threat : NULL);
+    } else {
+        ghost_ui_header(canvas, ssid, threat[0] ? threat : NULL);
+    }
 
     canvas_set_font(canvas, FontSecondary);
     // line 1: lock + full security; a small PMF! flag on the right (deauth-immune warning —
@@ -2394,7 +2763,14 @@ static bool ghost_info_input_callback(InputEvent* event, void* context) {
 void info_wifi_scene_on_enter(void* context) {
     FURI_LOG_D(TAG, __func__);
     Ghost5App* app = context;
-    with_view_model(app->info_view, InfoModel * m, { m->app = app; }, true);
+    with_view_model(
+        app->info_view,
+        InfoModel * m,
+        {
+            m->app = app;
+            m->ssid_px = 0;
+        },
+        true);
     view_dispatcher_switch_to_view(app->view_dispatcher, wifiInfoView);
 
     // push the current attack params to the firmware (unchanged from the widget version)
@@ -2408,16 +2784,25 @@ void info_wifi_scene_on_enter(void* context) {
     snprintf(cmd, 13, "PORTAL %d\n", app->captivePortal);
     uart_helper_send(app->uart_helper, cmd, strlen(cmd));
     furi_delay_ms(200);
+    // After the UART burst. The tick must not re-enter this function.
+    ghost_ssid_timer_start(app);
 }
 bool info_wifi_scene_on_event(void* context, SceneManagerEvent event) {
     FURI_LOG_D(TAG, __func__);
-    UNUSED(context);
-    UNUSED(event);
+    Ghost5App* app = context;
+    if(event.type == SceneManagerEventTypeCustom && event.event == GHOST_EVT_SSID_TICK) {
+        with_view_model(
+            app->info_view,
+            InfoModel * m,
+            { m->ssid_px = (uint16_t)(m->ssid_px + GHOST_SSID_SCROLL_STEP); },
+            true);
+        return true;
+    }
     return false;
 }
 void info_wifi_scene_on_exit(void* context) {
     FURI_LOG_D(TAG, __func__);
-    UNUSED(context);
+    ghost_ssid_timer_stop(context);
 }
 
 void config_ap_scene_on_enter(void* context);
@@ -3599,6 +3984,7 @@ static void handshake_build_menu(Ghost5App* app);
 static void handshake_scan_aps(Ghost5App* app) {
     view_dispatcher_switch_to_view(app->view_dispatcher, loadingView);
 
+    ghost_wifi_sweep_begin(app);
     for(int i = 0; i < app->wifiCount; i++) {
         free(app->wifiList[i].APssid);
     }
@@ -3617,6 +4003,7 @@ static void handshake_scan_aps(Ghost5App* app) {
     }
     notification_message(
         app->notif, &sequence_reset_blue); // 5Ghost task8: LED off when sweep ends
+    ghost_wifi_sweep_finish(app);
 }
 
 // Build the picker submenu from the current app->wifiList (5G only) with a Rescan row on top,
@@ -3627,8 +4014,10 @@ static void handshake_build_menu(Ghost5App* app) {
     submenu_set_header(app->submenu, "Pick 5G AP (handshake)");
     // Row 0 = Rescan (sentinel id); real AP rows follow at positions 1..N.
     submenu_add_item(app->submenu, "Rescan", GHOST_AP_RESCAN_ID, handshake_ap_item_callback, app);
-    int first_ap_pos = 0; // submenu position of the first AP (0 = none -> cursor stays on Rescan)
-    int pos = 1; // running submenu position (row 0 is Rescan)
+    // submenu_set_selected_item matches the item id, not the visual row.
+    // Rescan is GHOST_AP_RESCAN_ID; each AP row uses its wifiList index.
+    // Passing visual row 1 selected the AP whose id is 1 (the second AP).
+    int first_ap_id = -1; // wifiList index of the first listed AP; none -> Rescan
     for(int i = 0; i < app->wifiCount; i++) {
         // Handshake capture needs 5GHz (this chip can't hear the client's 2.4G uplink), so list
         // only 5G APs. Dropping the "5G|/2G|" prefix lets the SSID use the full row width — the
@@ -3661,10 +4050,10 @@ static void handshake_build_menu(Ghost5App* app) {
         // item id = real wifiList index (capture scene indexes wifiList by selectedWifi); passing i
         // instead of a running counter keeps the mapping correct after filtering out the 2.4G rows.
         submenu_add_item(app->submenu, temp, i, handshake_ap_item_callback, app);
-        if(first_ap_pos == 0) first_ap_pos = pos;
-        pos++;
+        if(first_ap_id < 0) first_ap_id = i;
     }
-    submenu_set_selected_item(app->submenu, first_ap_pos); // land on the first AP, not Rescan
+    submenu_set_selected_item(
+        app->submenu, first_ap_id >= 0 ? (uint32_t)first_ap_id : GHOST_AP_RESCAN_ID);
     view_dispatcher_switch_to_view(app->view_dispatcher, scannedWifisView);
 }
 
@@ -3685,8 +4074,8 @@ static void handshake_ap_item_callback(void* context, uint32_t index) {
     scene_manager_next_scene(app->scene_manager, handshakeCaptureScene);
 }
 
-// Select scene: reuse the cached AP list when returning from a capture (app->ap_reuse) so the
-// picker opens instantly; otherwise sweep fresh (fresh entry from the main menu, or empty cache).
+// Capture Back sets ap_reuse and reopens this picker. A finished SCAN:OK opens the same
+// cache after one STOP. Otherwise this scene runs its own LISTAP.
 void handshake_select_scene_on_enter(void* context) {
     FURI_LOG_D(TAG, __func__);
     Ghost5App* app = context;
@@ -3694,9 +4083,23 @@ void handshake_select_scene_on_enter(void* context) {
     if(app->ap_reuse && app->wifiCount > 0) {
         app->ap_reuse = false;
         handshake_build_menu(app);
+        // Back from capture: re-select the AP already stored in selectedWifi.
+        // Only 5 GHz rows are in this menu, so a filtered-out index stays on the first AP.
+        if(app->selectedWifi >= 0 && app->selectedWifi < app->wifiCount &&
+           app->wifiList[app->selectedWifi].channel > 14) {
+            submenu_set_selected_item(app->submenu, (uint32_t)app->selectedWifi);
+        }
         return;
     }
     app->ap_reuse = false;
+    if(app->wifi_sweep_done) {
+        // LISTAP used to tear down ATTACK. Opening the cache must still stop a client deauth.
+        if(app->uart_helper && !app->uart_port_busy) {
+            uart_helper_send(app->uart_helper, "STOP\n", 5);
+        }
+        handshake_build_menu(app);
+        return;
+    }
     handshake_scan_aps(app);
     handshake_build_menu(app);
 }
@@ -3922,6 +4325,7 @@ static void pmkid_build_menu(Ghost5App* app);
 static void pmkid_scan_aps(Ghost5App* app) {
     view_dispatcher_switch_to_view(app->view_dispatcher, loadingView);
 
+    ghost_wifi_sweep_begin(app);
     for(int i = 0; i < app->wifiCount; i++) {
         free(app->wifiList[i].APssid);
     }
@@ -3938,17 +4342,23 @@ static void pmkid_scan_aps(Ghost5App* app) {
         times++;
     }
     notification_message(app->notif, &sequence_reset_blue);
+    ghost_wifi_sweep_finish(app);
+    // Same order as the scan list: strongest RSSI first. idAP travels with the row.
+    // Do not sort on ap_reuse — selectedWifi is an index into the list the user left.
+    if(app->wifiCount > 1) wifi_sort_list(app->wifiList, app->wifiCount);
 }
 
 // Build the picker submenu from the current app->wifiList (all bands) with a Rescan row on top.
 static void pmkid_build_menu(Ghost5App* app) {
     app->submenuIndex = 0;
     submenu_reset(app->submenu);
-    submenu_set_header(app->submenu, "Pick AP (PMKID)");
+    submenu_set_header(app->submenu, "PMKID by signal");
     // Row 0 = Rescan (sentinel id); real AP rows follow at positions 1..N.
     submenu_add_item(app->submenu, "Rescan", GHOST_AP_RESCAN_ID, pmkid_ap_item_callback, app);
-    int first_ap_pos = 0; // submenu position of the first AP (0 = none -> cursor stays on Rescan)
-    int pos = 1; // running submenu position (row 0 is Rescan)
+    // submenu_set_selected_item matches the item id, not the visual row.
+    // Rescan is GHOST_AP_RESCAN_ID; each AP row uses its wifiList index.
+    // Passing visual row 1 selected the AP whose id is 1 (the second AP).
+    int first_ap_id = -1; // wifiList index of the first listed AP; none -> Rescan
     for(int i = 0; i < app->wifiCount; i++) {
         // PMKID is clientless (the firmware auths itself), so list every band — no 5G filter.
         bool dup = false;
@@ -3970,10 +4380,10 @@ static void pmkid_build_menu(Ghost5App* app) {
             snprintf(temp, sizeof(temp), "%s", ssid);
         }
         submenu_add_item(app->submenu, temp, i, pmkid_ap_item_callback, app);
-        if(first_ap_pos == 0) first_ap_pos = pos;
-        pos++;
+        if(first_ap_id < 0) first_ap_id = i;
     }
-    submenu_set_selected_item(app->submenu, first_ap_pos); // land on the first AP, not Rescan
+    submenu_set_selected_item(
+        app->submenu, first_ap_id >= 0 ? (uint32_t)first_ap_id : GHOST_AP_RESCAN_ID);
     view_dispatcher_switch_to_view(app->view_dispatcher, scannedWifisView);
 }
 
@@ -3994,8 +4404,8 @@ static void pmkid_ap_item_callback(void* context, uint32_t index) {
     scene_manager_next_scene(app->scene_manager, pmkidCaptureScene);
 }
 
-// Select scene: reuse the cached AP list when returning from a capture (app->ap_reuse) so the
-// picker opens instantly; otherwise sweep fresh (fresh entry from the main menu, or empty cache).
+// Capture Back sets ap_reuse and reopens this picker. A finished SCAN:OK opens the same
+// cache after one STOP. Otherwise this scene runs its own LISTAP.
 void pmkid_select_scene_on_enter(void* context) {
     FURI_LOG_D(TAG, __func__);
     Ghost5App* app = context;
@@ -4003,9 +4413,23 @@ void pmkid_select_scene_on_enter(void* context) {
     if(app->ap_reuse && app->wifiCount > 0) {
         app->ap_reuse = false;
         pmkid_build_menu(app);
+        // Back from capture: re-select the AP already stored in selectedWifi.
+        if(app->selectedWifi >= 0 && app->selectedWifi < app->wifiCount) {
+            submenu_set_selected_item(app->submenu, (uint32_t)app->selectedWifi);
+        }
         return;
     }
     app->ap_reuse = false;
+    if(app->wifi_sweep_done) {
+        if(app->uart_helper && !app->uart_port_busy) {
+            uart_helper_send(app->uart_helper, "STOP\n", 5);
+        }
+        // Cached LISTAP (scan list / handshake) is not always RSSI-sorted.
+        // Sort before the menu. ap_reuse already returned above, so selectedWifi is not in use.
+        if(app->wifiCount > 1) wifi_sort_list(app->wifiList, app->wifiCount);
+        pmkid_build_menu(app);
+        return;
+    }
     pmkid_scan_aps(app);
     pmkid_build_menu(app);
 }
@@ -4116,8 +4540,15 @@ static void pmkid_flush(Ghost5App* app) {
     char hc_path[112];
     char json_path[112];
     if(!ghost_resolve_session_id(app, session_id, sizeof(session_id)) ||
-       !ghost_session_path(hc_path, sizeof(hc_path), G5AuditFilePmkid22000, session_id) ||
-       !ghost_session_path(json_path, sizeof(json_path), G5AuditFilePmkidJson, session_id)) {
+       !ghost_capture_dest(
+           storage, hc_path, sizeof(hc_path), G5AuditFilePmkid22000, session_id, app->pmkid_ssid) ||
+       !ghost_capture_dest(
+           storage,
+           json_path,
+           sizeof(json_path),
+           G5AuditFilePmkidJson,
+           session_id,
+           app->pmkid_ssid)) {
         furi_record_close(RECORD_STORAGE);
         return;
     }
@@ -4155,6 +4586,7 @@ static void pmkid_flush(Ghost5App* app) {
             .pmkid_hex = app->pmkid_report.pmkid_hex,
             .reason = app->pmkid_report.reason,
             .have_22000 = app->pmkid_path[0] != '\0',
+            .artifact_hc22000 = app->pmkid_path[0] ? ghost_path_basename(app->pmkid_path) : NULL,
         };
         const size_t jn = g5_audit_build_pmkid_json(&in, json, 1024);
         if(jn > 0) ghost_evidence_atomic_write(storage, json_path, (const uint8_t*)json, jn);
@@ -4548,58 +4980,8 @@ static const char* ble_vendor_name(unsigned mfg) {
     }
 }
 
-// 5Ghost FUNC-D: WiFi AP vendor from the BSSID's OUI (first 3 MAC bytes = the
-// 24-bit IEEE Organizationally Unique Identifier). This is a DIFFERENT namespace
-// from ble_vendor_name()'s 16-bit Bluetooth SIG company id — a MAC OUI and a SIG
-// company id never coincide, so the two tables share nothing but the lookup shape.
-// Curated top-N of common home/SOHO router makers, NOT the full registry (Flipper
-// flash is finite — TP-Link alone holds 261 OUIs). Every prefix below is a real
-// IEEE-registered assignment (source: Netify MAC vendor DB / IEEE OUI registry,
-// fetched 2026-07). A BSSID whose OUI isn't listed shows no vendor — the full MAC
-// is already on the card and carries the OUI for anyone who wants to look it up.
-// APbssid is always upper-hex "AA:BB:CC:.." (firmware prints %02X, recon.cpp), so
-// a plain strncmp on the 8-char "AA:BB:CC" prefix suffices — no case folding.
-static const struct {
-    const char* oui;
-    const char* vendor;
-} g5_wifi_oui[] = {
-    {"00:14:78", "TP-Link"},  {"00:1D:0F", "TP-Link"},  {"14:CC:20", "TP-Link"},
-    {"14:CF:92", "TP-Link"},  {"50:C7:BF", "TP-Link"},  {"60:3A:7C", "TP-Link"},
-    {"00:09:5B", "Netgear"},  {"00:14:6C", "Netgear"},  {"00:1B:2F", "Netgear"},
-    {"20:0C:C8", "Netgear"},  {"2C:30:33", "Netgear"},  {"A0:40:A0", "Netgear"},
-    {"00:0D:88", "D-Link"},   {"00:0F:3D", "D-Link"},   {"00:11:95", "D-Link"},
-    {"00:17:9A", "D-Link"},   {"00:1B:11", "D-Link"},   {"1C:7E:E5", "D-Link"},
-    {"00:1B:FC", "ASUS"},     {"00:1E:8C", "ASUS"},     {"00:22:15", "ASUS"},
-    {"00:24:8C", "ASUS"},     {"04:D9:F5", "ASUS"},     {"2C:4D:54", "ASUS"},
-    {"50:4F:3B", "Xiaomi"},   {"5C:40:71", "Xiaomi"},   {"A4:C3:BE", "Xiaomi"},
-    {"FC:43:45", "Xiaomi"},   {"00:18:82", "Huawei"},   {"00:25:68", "Huawei"},
-    {"10:86:F4", "Huawei"},   {"28:45:AC", "Huawei"},   {"4C:2B:3B", "Huawei"},
-    {"58:B1:8F", "Huawei"},   {"08:40:F3", "Tenda"},    {"50:0F:F5", "Tenda"},
-    {"50:2B:73", "Tenda"},    {"B0:DF:C1", "Tenda"},    {"C8:3A:35", "Tenda"},
-    {"D8:32:14", "Tenda"},    {"00:15:6D", "Ubiquiti"}, {"00:27:22", "Ubiquiti"},
-    {"04:18:D6", "Ubiquiti"}, {"24:A4:3C", "Ubiquiti"}, {"44:D9:E7", "Ubiquiti"},
-    {"F0:9F:C2", "Ubiquiti"}, {"00:0C:41", "Linksys"},  {"00:14:BF", "Linksys"},
-    {"00:18:39", "Linksys"},  {"00:1A:70", "Linksys"},  {"00:21:29", "Linksys"},
-    {"00:23:69", "Linksys"},  {"00:0C:42", "MikroTik"}, {"08:55:31", "MikroTik"},
-    {"2C:C8:1B", "MikroTik"}, {"48:8F:5A", "MikroTik"}, {"6C:3B:6B", "MikroTik"},
-    {"74:4D:28", "MikroTik"}, {"00:1A:11", "Google"},   {"3C:5A:B4", "Google"},
-    {"54:60:09", "Google"},   {"94:95:A0", "Google"},   {"D8:6C:63", "Google"},
-    {"F4:F5:E8", "Google"},   {"00:71:47", "Amazon"},   {"34:D2:70", "Amazon"},
-    {"44:65:0D", "Amazon"},   {"68:37:E9", "Amazon"},   {"74:75:48", "Amazon"},
-    {"FC:65:DE", "Amazon"},
-};
-
-// Return the vendor for a BSSID whose OUI is in the curated table, else NULL.
-// strncmp (not strncasecmp) — APbssid is canonical upper hex; also dodges the
-// str*casecmp functions some official firmware builds strip. bssid shorter than
-// the prefix is safe: strncmp stops at the embedded NUL and reports a mismatch.
-static const char* wifi_oui_vendor(const char* bssid) {
-    if(!bssid) return NULL;
-    for(size_t i = 0; i < sizeof(g5_wifi_oui) / sizeof(g5_wifi_oui[0]); i++) {
-        if(strncmp(bssid, g5_wifi_oui[i].oui, 8) == 0) return g5_wifi_oui[i].vendor;
-    }
-    return NULL;
-}
+// WiFi vendor lookup is g5_oui_lookup(), loaded once from the SD table.
+// BLE company ids above are a different namespace.
 
 static void ghost_export_ble_csv(Ghost5App* app) {
     if(app->bleCount <= 0) return;
@@ -4611,7 +4993,7 @@ static void ghost_export_ble_csv(Ghost5App* app) {
     snprintf(
         path,
         sizeof(path),
-        GHOST_DATA_DIR "/ble_%04d%02d%02d_%02d%02d%02d.csv",
+        GHOST_DATA_DIR "/ble/ble_%04d%02d%02d_%02d%02d%02d.csv",
         dt.year,
         dt.month,
         dt.day,
@@ -4723,15 +5105,15 @@ static void ble_list_draw_callback(Canvas* canvas, void* model) {
     canvas_set_color(canvas, ColorBlack);
 
     if(!app || app->bleCount <= 0) {
-        const char* main_s;
-        const char* sub_s;
-        ghost_uart_empty_copy(
-            app,
-            app && app->ble_scan_timed_out,
-            "No BLE devices",
-            "Press OK to scan",
-            &main_s,
-            &sub_s);
+        const char* main_s = "No BLE devices";
+        const char* sub_s = "Right: scan";
+        if(app && app->uart_port_busy) {
+            main_s = "USART busy";
+            sub_s = "Listen UART=None";
+        } else if(app && app->ble_scan_timed_out) {
+            main_s = "No response";
+            sub_s = "Right: scan";
+        }
         ghost_ui_header(canvas, "BLE", NULL);
         canvas_set_font(canvas, FontPrimary);
         canvas_draw_str_aligned(canvas, 64, 32, AlignCenter, AlignCenter, main_s);
@@ -4862,41 +5244,20 @@ static bool ble_list_input_callback(InputEvent* event, void* context) {
     Ghost5App* app = context;
     if(event->type != InputTypeShort && event->type != InputTypeRepeat) return false;
 
-    if(app->bleCount <= 0) {
-        if(event->key == InputKeyOk) {
-            app->ble_accumulate = false; // empty list: re-scan as a fresh session
-            scene_manager_next_scene(app->scene_manager, bleScanScene);
-            return true;
-        }
-        return false;
-    }
-
-    // OK opens the per-device detail page; Right re-scans in place. Suppressed when the
-    // alarms-only view is empty (nothing selectable — the draw shows "No alarms").
-    if(event->key == InputKeyOk) {
-        if(ble_eff_count(app) <= 0) return true;
-        with_view_model(app->ble_list_view, ListModel * m, { app->selectedBle = m->sel; }, false);
-        scene_manager_next_scene(app->scene_manager, bleInfoScene);
-        return true;
-    }
+    // Right always merge-rescans, including an empty list. OK never starts a scan.
     if(event->key == InputKeyRight) {
         app->ble_accumulate =
             true; // 5Ghost FUNC-C: re-scan merges into the accumulated list (dedup by MAC)
         scene_manager_next_scene(app->scene_manager, bleScanScene);
         return true;
     }
-    // 阶段1: Left toggles the alarms-only filter. Alarm devices are the sorted prefix,
-    // so this just changes the effective length; reset sel/top to a valid 0 either way.
-    if(event->key == InputKeyLeft) {
-        app->ble_filter_alarms = !app->ble_filter_alarms;
-        with_view_model(
-            app->ble_list_view,
-            ListModel * m,
-            {
-                m->sel = 0;
-                m->top = 0;
-            },
-            true);
+    if(app->bleCount <= 0) return false;
+
+    // OK opens the per-device detail page. Left has no action on this list.
+    if(event->key == InputKeyOk) {
+        if(ble_eff_count(app) <= 0) return true;
+        with_view_model(app->ble_list_view, ListModel * m, { app->selectedBle = m->sel; }, false);
+        scene_manager_next_scene(app->scene_manager, bleInfoScene);
         return true;
     }
 
@@ -4918,6 +5279,49 @@ static bool ble_list_input_callback(InputEvent* event, void* context) {
         },
         true);
     return handled;
+}
+
+// BLE hub. Scan nearby is the only fresh (clearing) sweep. Nearby n reopens the
+// last result without scanning. Saved never touches the radio.
+static void ble_menu_cb(void* context, uint32_t index) {
+    Ghost5App* app = context;
+    const bool have = app->ble_sweep_done;
+    const uint32_t saved_i = have ? 2u : 1u;
+    if(index == 0) {
+        app->ble_accumulate = false;
+        scene_manager_next_scene(app->scene_manager, bleScanScene);
+        return;
+    }
+    if(have && index == 1) {
+        scene_manager_next_scene(app->scene_manager, bleListScene);
+        return;
+    }
+    if(index == saved_i) scene_manager_next_scene(app->scene_manager, bleAdvLibScene);
+}
+
+void ble_menu_scene_on_enter(void* context) {
+    Ghost5App* app = context;
+    submenu_reset(app->submenu);
+    submenu_set_header(app->submenu, "BLE");
+    submenu_add_item(app->submenu, "Scan nearby", 0, ble_menu_cb, app);
+    uint32_t next = 1;
+    if(app->ble_sweep_done) {
+        // Submenu may keep the pointer. GUI thread only, so a static buffer is enough.
+        static char near[16];
+        snprintf(near, sizeof(near), "Nearby %d", app->bleCount);
+        submenu_add_item(app->submenu, near, next, ble_menu_cb, app);
+        next++;
+    }
+    submenu_add_item(app->submenu, "Saved", next, ble_menu_cb, app);
+    view_dispatcher_switch_to_view(app->view_dispatcher, beaconListView);
+}
+bool ble_menu_scene_on_event(void* context, SceneManagerEvent event) {
+    UNUSED(context);
+    UNUSED(event);
+    return false;
+}
+void ble_menu_scene_on_exit(void* context) {
+    UNUSED(context);
 }
 
 // bleScanScene: send BLESCAN, block on loading view until BLE:OK (or timeout),
@@ -4959,6 +5363,7 @@ void ble_scan_scene_on_enter(void* context) {
     }
     notification_message(app->notif, &sequence_reset_blue);
     app->ble_scan_timed_out = (bleScanFinish == false);
+    app->ble_sweep_done = true;
 
     scene_manager_next_scene(app->scene_manager, bleListScene);
 }
@@ -5007,7 +5412,8 @@ void ble_list_scene_on_enter(void* context) {
 bool ble_list_scene_on_event(void* context, SceneManagerEvent event) {
     Ghost5App* app = context;
     if(event.type == SceneManagerEventTypeBack) {
-        scene_manager_search_and_switch_to_previous_scene(app->scene_manager, mainMenuScene);
+        // Skip the loading scan scene. Land on the BLE menu, not the home screen.
+        scene_manager_search_and_switch_to_previous_scene(app->scene_manager, bleMenuScene);
         return true;
     }
     return false;
@@ -5384,7 +5790,7 @@ void gatt_probe_scene_on_exit(void* context) {
 // 0xFEAA/0x41 service data called out as Google FMDN (④). Read-only, no UART — the bytes
 // are already in bleList[selectedBle].raw. Scrolls with the ListModel top index, same
 // pattern as gattView. Back returns to the detail card (dispatcher).
-#define BLE_RAW_VIEW_ROWS 4 // visible content rows below the header (matches gattView)
+#define BLE_RAW_VIEW_ROWS 3 // one row given to the Save/Replay hint at the bottom
 #define BLE_RAW_VIEW_TOP \
     22 // y of the first content row — clears the header bar (was 16, overlapped)
 #define BLE_RAW_HEX_PER_ROW 10 // advert bytes per hex row (20 chars ~ fits 128px)
@@ -5528,10 +5934,18 @@ static void ble_raw_view_draw_callback(Canvas* canvas, void* model) {
     if(total > BLE_RAW_VIEW_ROWS)
         elements_scrollbar_pos(
             canvas, 125, BLE_RAW_VIEW_TOP - 8, 64 - (BLE_RAW_VIEW_TOP - 8), m->top, total);
+    if(app && app->bleadv_note[0])
+        canvas_draw_str(canvas, 4, 62, app->bleadv_note);
+    else
+        canvas_draw_str(canvas, 4, 62, "OK: Save");
 }
 
 static bool ble_raw_view_input_callback(InputEvent* event, void* context) {
     Ghost5App* app = context;
+    if(event->type == InputTypeShort && event->key == InputKeyOk) {
+        view_dispatcher_send_custom_event(app->view_dispatcher, GHOST_EVT_BLEADV_SAVE);
+        return true;
+    }
     if(event->type != InputTypeShort && event->type != InputTypeRepeat) return false;
     if(event->key != InputKeyUp && event->key != InputKeyDown) return false; // Back -> dispatcher
 
@@ -5554,9 +5968,12 @@ static bool ble_raw_view_input_callback(InputEvent* event, void* context) {
     return handled;
 }
 
+static void bleadv_save_current(Ghost5App* app);
+
 void ble_raw_scene_on_enter(void* context) {
     FURI_LOG_D(TAG, __func__);
     Ghost5App* app = context;
+    app->bleadv_note[0] = '\0';
     with_view_model(
         app->ble_raw_view,
         ListModel * m,
@@ -5569,14 +5986,385 @@ void ble_raw_scene_on_enter(void* context) {
     view_dispatcher_switch_to_view(app->view_dispatcher, bleRawView);
 }
 bool ble_raw_scene_on_event(void* context, SceneManagerEvent event) {
-    UNUSED(context);
-    UNUSED(event);
+    Ghost5App* app = context;
+    if(event.type == SceneManagerEventTypeCustom && event.event == GHOST_EVT_BLEADV_SAVE) {
+        bleadv_save_current(app);
+        with_view_model(app->ble_raw_view, ListModel * m, { m->app = app; }, true);
+        return true;
+    }
     return false; // Back -> dispatcher pops back to the BLE detail card
 }
 void ble_raw_scene_on_exit(void* context) {
     UNUSED(context);
 }
 // ========================== end 5Ghost ③: raw-advert view =====================
+
+// ============================ issue #7: save and replay one advert ============
+// Stores the BLERAW bytes already on the detail card. Replay is NONCONN from the
+// board's own address (firmware BLEADV). The saved MAC/name is a label only.
+#define BLEADV_SLOTS     16
+#define BLEADV_HEX_MAX   62
+#define BLEADV_LABEL_MAX 18
+#define BLEADV_PATH      GHOST_DATA_DIR "/bleadv.txt"
+
+typedef struct {
+    char hex[BLEADV_HEX_MAX + 1];
+    char label[BLEADV_LABEL_MAX + 1];
+} BleAdvSlot;
+
+static BleAdvSlot bleadv_slots[BLEADV_SLOTS];
+static int bleadv_slot_count;
+static char bleadv_filebuf[BLEADV_SLOTS * 96];
+
+static bool bleadv_take_hex(const char* s, size_t n, char* out, size_t out_sz) {
+    if(n < 2 || n > BLEADV_HEX_MAX || (n % 2) != 0 || n + 1 > out_sz) return false;
+    for(size_t i = 0; i < n; i++) {
+        if(hex_nib(s[i]) < 0) return false;
+        out[i] = (s[i] >= 'a' && s[i] <= 'f') ? (char)(s[i] - 'a' + 'A') : s[i];
+    }
+    out[n] = '\0';
+    return true;
+}
+
+static void bleadv_copy_label(const char* s, char* out, size_t out_sz) {
+    size_t j = 0;
+    while(*s == ' ')
+        s++;
+    for(; *s && *s != '\r' && j + 1 < out_sz && j < BLEADV_LABEL_MAX; s++) {
+        char c = *s;
+        if(c < 0x20 || c > 0x7e) c = '_';
+        out[j++] = c;
+    }
+    if(j == 0) {
+        snprintf(out, out_sz, "adv");
+        return;
+    }
+    out[j] = '\0';
+}
+
+static void bleadv_load(void) {
+    bleadv_slot_count = 0;
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, BLEADV_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        size_t n = storage_file_read(file, bleadv_filebuf, sizeof(bleadv_filebuf) - 1);
+        bleadv_filebuf[n] = '\0';
+        storage_file_close(file);
+        char* p = bleadv_filebuf;
+        while(*p && bleadv_slot_count < BLEADV_SLOTS) {
+            char* eol = strchr(p, '\n');
+            if(eol) *eol = '\0';
+            char* sp = strchr(p, ' ');
+            size_t hl = sp ? (size_t)(sp - p) : strlen(p);
+            BleAdvSlot* slot = &bleadv_slots[bleadv_slot_count];
+            if(bleadv_take_hex(p, hl, slot->hex, sizeof(slot->hex))) {
+                if(sp)
+                    bleadv_copy_label(sp + 1, slot->label, sizeof(slot->label));
+                else
+                    snprintf(slot->label, sizeof(slot->label), "adv");
+                bleadv_slot_count++;
+            }
+            if(!eol) break;
+            p = eol + 1;
+        }
+    }
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+}
+
+static void bleadv_save_current(Ghost5App* app) {
+    if(app->selectedBle < 0 || app->selectedBle >= app->bleCount) {
+        snprintf(app->bleadv_note, sizeof(app->bleadv_note), "No device");
+        return;
+    }
+    const BLEDeviceDetails* d = &app->bleList[app->selectedBle];
+    if(d->raw_len == 0 || d->raw_len > 31) {
+        snprintf(app->bleadv_note, sizeof(app->bleadv_note), "No raw");
+        return;
+    }
+    char hex[BLEADV_HEX_MAX + 1];
+    size_t off = 0;
+    for(uint8_t i = 0; i < d->raw_len && off + 2 < sizeof(hex); i++)
+        off += snprintf(hex + off, sizeof(hex) - off, "%02X", d->raw[i]);
+    bleadv_load();
+    for(int i = 0; i < bleadv_slot_count; i++) {
+        if(strcmp(bleadv_slots[i].hex, hex) == 0) {
+            snprintf(app->bleadv_note, sizeof(app->bleadv_note), "Already saved");
+            return;
+        }
+    }
+    if(bleadv_slot_count >= BLEADV_SLOTS) {
+        snprintf(app->bleadv_note, sizeof(app->bleadv_note), "Full (16)");
+        return;
+    }
+    char label[BLEADV_LABEL_MAX + 1];
+    const char* src = (d->name[0] && strcmp(d->name, "-") != 0) ? d->name : d->addr;
+    bleadv_copy_label(src, label, sizeof(label));
+    char line[96];
+    snprintf(line, sizeof(line), "%s %s\n", hex, label);
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    storage_simply_mkdir(storage, GHOST_DATA_DIR);
+    File* file = storage_file_alloc(storage);
+    bool ok = storage_file_open(file, BLEADV_PATH, FSAM_WRITE, FSOM_OPEN_APPEND);
+    if(!ok) ok = storage_file_open(file, BLEADV_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS);
+    if(ok) {
+        storage_file_write(file, line, strlen(line));
+        storage_file_close(file);
+        snprintf(app->bleadv_note, sizeof(app->bleadv_note), "Saved");
+    } else {
+        snprintf(app->bleadv_note, sizeof(app->bleadv_note), "Save failed");
+    }
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+}
+
+static bool bleadv_normalize_hex(char* s, size_t cap) {
+    size_t n = 0;
+    while(s[n])
+        n++;
+    if(!bleadv_take_hex(s, n, s, cap)) return false;
+    return true;
+}
+
+static bool bleadv_write_file(void) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    storage_simply_mkdir(storage, GHOST_DATA_DIR);
+    File* file = storage_file_alloc(storage);
+    bool ok = storage_file_open(file, BLEADV_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS);
+    if(ok) {
+        for(int i = 0; i < bleadv_slot_count; i++) {
+            char line[96];
+            int n = snprintf(
+                line, sizeof(line), "%s %s\n", bleadv_slots[i].hex, bleadv_slots[i].label);
+            if(n > 0) storage_file_write(file, line, (uint16_t)n);
+        }
+        storage_file_close(file);
+    }
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+    return ok;
+}
+
+static void bleadv_lib_cb(void* context, uint32_t index) {
+    Ghost5App* app = context;
+    const uint32_t hex_i = (uint32_t)bleadv_slot_count;
+    const uint32_t del_i = hex_i + 1;
+    if(index == hex_i) {
+        scene_manager_next_scene(app->scene_manager, bleAdvHexScene);
+        return;
+    }
+    if(bleadv_slot_count > 0 && index == del_i) {
+        scene_manager_next_scene(app->scene_manager, bleAdvDelScene);
+        return;
+    }
+    if(index >= hex_i) return;
+    snprintf(app->bleadv_hex, sizeof(app->bleadv_hex), "%s", bleadv_slots[index].hex);
+    snprintf(app->bleadv_label, sizeof(app->bleadv_label), "%s", bleadv_slots[index].label);
+    scene_manager_next_scene(app->scene_manager, bleAdvDurScene);
+}
+
+static void bleadv_del_pick_cb(void* context, uint32_t index) {
+    Ghost5App* app = context;
+    if(index >= (uint32_t)bleadv_slot_count) return;
+    app->bleadv_del = (int)index;
+    snprintf(app->bleadv_label, sizeof(app->bleadv_label), "%s", bleadv_slots[index].label);
+    scene_manager_next_scene(app->scene_manager, bleAdvDelAskScene);
+}
+
+static void bleadv_del_ask_cb(void* context, uint32_t index) {
+    UNUSED(index);
+    Ghost5App* app = context;
+    view_dispatcher_send_custom_event(app->view_dispatcher, GHOST_EVT_BLEADV_DEL);
+}
+
+static void bleadv_dur_cb(void* context, uint32_t index) {
+    Ghost5App* app = context;
+    const int secs[] = {30, 60, 120};
+    app->bleadv_secs = (index < 3) ? secs[index] : 30;
+    scene_manager_next_scene(app->scene_manager, bleAdvRunScene);
+}
+
+static void bleadv_hex_cb(void* context) {
+    Ghost5App* app = context;
+    scene_manager_handle_custom_event(app->scene_manager, GHOST_EVT_BLEADV_HEX);
+}
+
+static void bleadv_run_draw(Ghost5App* app) {
+    widget_reset(app->widget);
+    if(app->bleadv_unsupported) {
+        widget_add_string_element(
+            app->widget, 64, 14, AlignCenter, AlignTop, FontPrimary, "No BLEADV");
+        widget_add_string_element(
+            app->widget, 64, 32, AlignCenter, AlignTop, FontSecondary, "Firmware too old");
+        widget_add_string_element(
+            app->widget, 64, 46, AlignCenter, AlignTop, FontSecondary, "Back");
+        return;
+    }
+    if(app->bleadv_done) {
+        widget_add_string_element(
+            app->widget, 64, 14, AlignCenter, AlignTop, FontPrimary, "Replay done");
+        widget_add_string_element(
+            app->widget, 64, 32, AlignCenter, AlignTop, FontSecondary, "Radio released");
+        widget_add_string_element(
+            app->widget, 64, 46, AlignCenter, AlignTop, FontSecondary, "Back");
+        return;
+    }
+    widget_add_string_element(app->widget, 64, 6, AlignCenter, AlignTop, FontPrimary, "Replay TX");
+    widget_add_string_element(
+        app->widget, 64, 20, AlignCenter, AlignTop, FontSecondary, app->bleadv_label);
+    widget_add_string_element(
+        app->widget, 64, 32, AlignCenter, AlignTop, FontSecondary, "Board address");
+    char line[24];
+    snprintf(line, sizeof(line), "Broadcasting %ds", app->bleadv_secs);
+    widget_add_string_element(app->widget, 64, 44, AlignCenter, AlignTop, FontSecondary, line);
+    widget_add_string_element(
+        app->widget, 64, 56, AlignCenter, AlignTop, FontSecondary, "Back sends STOP");
+}
+
+void ble_adv_lib_scene_on_enter(void* context) {
+    Ghost5App* app = context;
+    bleadv_load();
+    submenu_reset(app->submenu);
+    submenu_set_header(app->submenu, "Saved adverts");
+    for(int i = 0; i < bleadv_slot_count; i++)
+        submenu_add_item(app->submenu, bleadv_slots[i].label, i, bleadv_lib_cb, app);
+    submenu_add_item(app->submenu, "Custom hex", (uint32_t)bleadv_slot_count, bleadv_lib_cb, app);
+    if(bleadv_slot_count > 0) {
+        submenu_add_item(
+            app->submenu, "Delete", (uint32_t)bleadv_slot_count + 1, bleadv_lib_cb, app);
+    }
+    view_dispatcher_switch_to_view(app->view_dispatcher, beaconListView);
+}
+bool ble_adv_lib_scene_on_event(void* context, SceneManagerEvent event) {
+    UNUSED(context);
+    UNUSED(event);
+    return false;
+}
+void ble_adv_lib_scene_on_exit(void* context) {
+    UNUSED(context);
+}
+
+void ble_adv_del_scene_on_enter(void* context) {
+    Ghost5App* app = context;
+    bleadv_load();
+    submenu_reset(app->submenu);
+    submenu_set_header(app->submenu, "Delete");
+    for(int i = 0; i < bleadv_slot_count; i++)
+        submenu_add_item(
+            app->submenu, bleadv_slots[i].label, (uint32_t)i, bleadv_del_pick_cb, app);
+    view_dispatcher_switch_to_view(app->view_dispatcher, beaconListView);
+}
+bool ble_adv_del_scene_on_event(void* context, SceneManagerEvent event) {
+    UNUSED(context);
+    UNUSED(event);
+    return false;
+}
+void ble_adv_del_scene_on_exit(void* context) {
+    UNUSED(context);
+}
+
+void ble_adv_del_ask_scene_on_enter(void* context) {
+    Ghost5App* app = context;
+    submenu_reset(app->submenu);
+    submenu_set_header(app->submenu, app->bleadv_label);
+    submenu_add_item(app->submenu, "Delete", 0, bleadv_del_ask_cb, app);
+    view_dispatcher_switch_to_view(app->view_dispatcher, beaconListView);
+}
+bool ble_adv_del_ask_scene_on_event(void* context, SceneManagerEvent event) {
+    Ghost5App* app = context;
+    if(event.type != SceneManagerEventTypeCustom || event.event != GHOST_EVT_BLEADV_DEL)
+        return false;
+    bleadv_load();
+    int idx = app->bleadv_del;
+    if(idx >= 0 && idx < bleadv_slot_count) {
+        for(int i = idx; i < bleadv_slot_count - 1; i++)
+            bleadv_slots[i] = bleadv_slots[i + 1];
+        bleadv_slot_count--;
+        bleadv_write_file();
+    }
+    app->bleadv_del = -1;
+    scene_manager_search_and_switch_to_previous_scene(app->scene_manager, bleAdvLibScene);
+    return true;
+}
+void ble_adv_del_ask_scene_on_exit(void* context) {
+    UNUSED(context);
+}
+
+void ble_adv_hex_scene_on_enter(void* context) {
+    Ghost5App* app = context;
+    text_input_reset(app->text_input);
+    text_input_set_header_text(app->text_input, "Even hex, 1-31 bytes");
+    text_input_set_result_callback(
+        app->text_input, bleadv_hex_cb, app, app->bleadv_hex, sizeof(app->bleadv_hex), false);
+    view_dispatcher_switch_to_view(app->view_dispatcher, bssidTextInputView);
+}
+bool ble_adv_hex_scene_on_event(void* context, SceneManagerEvent event) {
+    Ghost5App* app = context;
+    if(event.type == SceneManagerEventTypeCustom && event.event == GHOST_EVT_BLEADV_HEX) {
+        if(!bleadv_normalize_hex(app->bleadv_hex, sizeof(app->bleadv_hex))) {
+            text_input_set_header_text(app->text_input, "Even hex, 1-31 bytes");
+            return true;
+        }
+        snprintf(app->bleadv_label, sizeof(app->bleadv_label), "Custom");
+        scene_manager_next_scene(app->scene_manager, bleAdvDurScene);
+        return true;
+    }
+    return false;
+}
+void ble_adv_hex_scene_on_exit(void* context) {
+    UNUSED(context);
+}
+
+void ble_adv_dur_scene_on_enter(void* context) {
+    Ghost5App* app = context;
+    submenu_reset(app->submenu);
+    submenu_set_header(app->submenu, "Board address");
+    submenu_add_item(app->submenu, "30 sec", 0, bleadv_dur_cb, app);
+    submenu_add_item(app->submenu, "60 sec", 1, bleadv_dur_cb, app);
+    submenu_add_item(app->submenu, "120 sec", 2, bleadv_dur_cb, app);
+    view_dispatcher_switch_to_view(app->view_dispatcher, beaconListView);
+}
+bool ble_adv_dur_scene_on_event(void* context, SceneManagerEvent event) {
+    UNUSED(context);
+    UNUSED(event);
+    return false;
+}
+void ble_adv_dur_scene_on_exit(void* context) {
+    UNUSED(context);
+}
+
+void ble_adv_run_scene_on_enter(void* context) {
+    Ghost5App* app = context;
+    app->bleadv_waiting = true;
+    app->bleadv_done = false;
+    app->bleadv_unsupported = false;
+    bleadv_run_draw(app);
+    view_dispatcher_switch_to_view(app->view_dispatcher, beaconInfoView);
+    char cmd[80];
+    int n = snprintf(cmd, sizeof(cmd), "BLEADV %s %d\n", app->bleadv_hex, app->bleadv_secs);
+    if(n > 0 && (size_t)n < sizeof(cmd)) uart_helper_send(app->uart_helper, cmd, (size_t)n);
+}
+bool ble_adv_run_scene_on_event(void* context, SceneManagerEvent event) {
+    Ghost5App* app = context;
+    if(event.type == SceneManagerEventTypeBack) {
+        // on_exit sends STOP. Land on Saved, not the duration page.
+        scene_manager_search_and_switch_to_previous_scene(app->scene_manager, bleAdvLibScene);
+        return true;
+    }
+    if(event.type == SceneManagerEventTypeCustom &&
+       (event.event == GHOST_EVT_BLEADV_DONE || event.event == GHOST_EVT_BLEADV_FAIL)) {
+        bleadv_run_draw(app);
+        return true;
+    }
+    return false;
+}
+void ble_adv_run_scene_on_exit(void* context) {
+    Ghost5App* app = context;
+    if(app->bleadv_waiting && !app->bleadv_done) uart_helper_send(app->uart_helper, "STOP\n", 5);
+    app->bleadv_waiting = false;
+    widget_reset(app->widget);
+}
+// ========================== end issue #7 =====================================
 
 // ============================ 5Ghost FUNC-A: station list ====================
 // WiFi station (client) list for ONE AP. Rich rows (MAC + RSSI), mirrors the
@@ -5635,8 +6423,8 @@ static void sta_list_draw_callback(Canvas* canvas, void* model) {
         int rw = canvas_string_width(canvas, rs);
         canvas_draw_str(canvas, 116 - rw, yb, rs);
 
-        // MAC "AA:BB:CC:DD:EE:FF" from the colon-less 12hex, left; truncate only if
-        // it would collide with the RSSI (hex MACs are narrow, so it rarely does).
+        // MAC from the colon-less 12hex. Vendor after it when both fit; otherwise
+        // the colon MAC alone, same as before.
         char mac[18];
         snprintf(
             mac,
@@ -5654,10 +6442,32 @@ static void sta_list_draw_callback(Canvas* canvas, void* model) {
             st->mac[9],
             st->mac[10],
             st->mac[11]);
-        int macw = 112 - rw;
-        while(mac[0] && canvas_string_width(canvas, mac) > macw)
-            mac[strlen(mac) - 1] = '\0';
-        canvas_draw_str(canvas, 4, yb, mac);
+        const char* vend = wifi_oui_vendor(st->mac);
+        int limit = 112 - rw;
+        if(limit < 0) limit = 0;
+        int mac_px = canvas_string_width(canvas, mac);
+        int vend_w = (vend && vend[0]) ? canvas_string_width(canvas, vend) : 0;
+        if(vend_w > 0 && mac_px + 4 + vend_w <= limit) {
+            canvas_draw_str(canvas, 4, yb, mac);
+            canvas_draw_str(canvas, 4 + mac_px + 4, yb, vend);
+        } else if(vend_w > 0) {
+            char compact[13];
+            memcpy(compact, st->mac, 12);
+            compact[12] = '\0';
+            int cw = canvas_string_width(canvas, compact);
+            if(cw + 4 + vend_w <= limit) {
+                canvas_draw_str(canvas, 4, yb, compact);
+                canvas_draw_str(canvas, 4 + cw + 4, yb, vend);
+            } else {
+                while(mac[0] && canvas_string_width(canvas, mac) > limit)
+                    mac[strlen(mac) - 1] = '\0';
+                canvas_draw_str(canvas, 4, yb, mac);
+            }
+        } else {
+            while(mac[0] && canvas_string_width(canvas, mac) > limit)
+                mac[strlen(mac) - 1] = '\0';
+            canvas_draw_str(canvas, 4, yb, mac);
+        }
     }
 
     canvas_set_color(canvas, ColorBlack);
@@ -5831,6 +6641,7 @@ static void audit_clear_wifi_list(Ghost5App* app) {
 static void audit_start_listap(Ghost5App* app) {
     view_dispatcher_switch_to_view(app->view_dispatcher, loadingView);
     audit_clear_wifi_list(app);
+    ghost_wifi_sweep_begin(app);
     scanFinish = false;
     app->scan_timed_out = false;
     uart_helper_send(app->uart_helper, "LISTAP\n", 7);
@@ -5839,11 +6650,69 @@ static void audit_start_listap(Ghost5App* app) {
 
 static void audit_write_sidecar(Ghost5App* app) {
     if(!g5_session_id_valid(app->session_id)) return;
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    ghost_ensure_data_dir(storage);
     char json_path[112];
-    if(!ghost_session_path(json_path, sizeof(json_path), G5AuditFileAuditJson, app->session_id))
-        return;
+    char scratch[112];
+    // Five basenames live on the heap. This scene already shares the 2KB app stack.
+    char* names = malloc(G5_AUDIT_BASENAME_MAX * 5);
     char* json = malloc(1024);
-    if(!json) return;
+    if(!names || !json ||
+       !ghost_capture_dest(
+           storage,
+           json_path,
+           sizeof(json_path),
+           G5AuditFileAuditJson,
+           app->session_id,
+           app->audit_ssid)) {
+        free(names);
+        free(json);
+        furi_record_close(RECORD_STORAGE);
+        return;
+    }
+    char* name_audit = names;
+    char* name_pcap = names + G5_AUDIT_BASENAME_MAX;
+    char* name_capture_json = names + (G5_AUDIT_BASENAME_MAX * 2);
+    char* name_hc = names + (G5_AUDIT_BASENAME_MAX * 3);
+    char* name_pmkid_json = names + (G5_AUDIT_BASENAME_MAX * 4);
+    const bool have_pcap = app->hs_path[0] != '\0';
+    const bool have_capture_json = (app->audit_path == G5AuditPathHs) &&
+                                   ((app->audit_result == G5AuditResultComplete) ||
+                                    (app->audit_result == G5AuditResultPartial));
+    const bool have_hc = app->pmkid_path[0] != '\0';
+    const bool have_pmkid_json = (app->audit_path == G5AuditPathPmkid) && app->pmkid_done;
+    bool names_ok = ghost_store_basename(name_audit, G5_AUDIT_BASENAME_MAX, json_path);
+    if(have_pcap)
+        names_ok = names_ok &&
+                   ghost_store_basename(name_pcap, G5_AUDIT_BASENAME_MAX, app->hs_path);
+    if(names_ok && have_capture_json) {
+        names_ok = ghost_capture_dest(
+                       storage,
+                       scratch,
+                       sizeof(scratch),
+                       G5AuditFileCaptureJson,
+                       app->session_id,
+                       app->hs_ssid) &&
+                   ghost_store_basename(name_capture_json, G5_AUDIT_BASENAME_MAX, scratch);
+    }
+    if(names_ok && have_hc)
+        names_ok = ghost_store_basename(name_hc, G5_AUDIT_BASENAME_MAX, app->pmkid_path);
+    if(names_ok && have_pmkid_json) {
+        names_ok = ghost_capture_dest(
+                       storage,
+                       scratch,
+                       sizeof(scratch),
+                       G5AuditFilePmkidJson,
+                       app->session_id,
+                       app->pmkid_ssid) &&
+                   ghost_store_basename(name_pmkid_json, G5_AUDIT_BASENAME_MAX, scratch);
+    }
+    if(!names_ok) {
+        free(names);
+        free(json);
+        furi_record_close(RECORD_STORAGE);
+        return;
+    }
     G5AuditJsonIn in = {
         .session_id = app->session_id,
         .ssid = app->audit_ssid,
@@ -5854,20 +6723,20 @@ static void audit_write_sidecar(Ghost5App* app) {
         .fw_caps = app->fw_caps,
         .path = app->audit_path,
         .result = app->audit_result,
-        .have_capture_pcap = app->hs_path[0] != '\0',
-        .have_capture_json = (app->audit_path == G5AuditPathHs) &&
-                             ((app->audit_result == G5AuditResultComplete) ||
-                              (app->audit_result == G5AuditResultPartial)),
-        .have_pmkid_22000 = app->pmkid_path[0] != '\0',
-        .have_pmkid_json = (app->audit_path == G5AuditPathPmkid) && app->pmkid_done,
+        .have_capture_pcap = have_pcap,
+        .have_capture_json = have_capture_json,
+        .have_pmkid_22000 = have_hc,
+        .have_pmkid_json = have_pmkid_json,
+        .artifact_pcap = have_pcap ? name_pcap : NULL,
+        .artifact_capture_json = have_capture_json ? name_capture_json : NULL,
+        .artifact_hc22000 = have_hc ? name_hc : NULL,
+        .artifact_pmkid_json = have_pmkid_json ? name_pmkid_json : NULL,
+        .artifact_audit = name_audit,
     };
     const size_t n = g5_audit_build_audit_json(&in, json, 1024);
-    if(n > 0) {
-        Storage* storage = furi_record_open(RECORD_STORAGE);
-        ghost_ensure_data_dir(storage);
-        ghost_evidence_atomic_write(storage, json_path, (const uint8_t*)json, n);
-        furi_record_close(RECORD_STORAGE);
-    }
+    if(n > 0) ghost_evidence_atomic_write(storage, json_path, (const uint8_t*)json, n);
+    furi_record_close(RECORD_STORAGE);
+    free(names);
     free(json);
 }
 
@@ -6071,7 +6940,7 @@ static void audit_ap_item_callback(void* context, uint32_t index) {
 void audit_select_scene_on_enter(void* context) {
     Ghost5App* app = context;
     app->menuIndex = 0;
-    if(app->wifiCount > 0) {
+    if(app->wifi_sweep_done) {
         audit_build_menu(app);
         return;
     }
@@ -6090,6 +6959,7 @@ bool audit_select_scene_on_event(void* context, SceneManagerEvent event) {
         if(scanFinish) {
             audit_timer_stop(app);
             app->scan_timed_out = false;
+            ghost_wifi_sweep_finish(app);
             audit_build_menu(app);
             return true;
         }
@@ -6097,6 +6967,7 @@ bool audit_select_scene_on_event(void* context, SceneManagerEvent event) {
         if(app->audit_wait_ticks == 0) {
             audit_timer_stop(app);
             app->scan_timed_out = true;
+            ghost_wifi_sweep_finish(app);
             audit_build_menu(app);
         }
         return true;
@@ -6303,6 +7174,70 @@ void audit_run_scene_on_exit(void* context) {
     widget_reset(app->widget);
 }
 
+// Scan Wi-Fi hub. Scan now is the only row that starts a sweep from here.
+// AP list appears only after SCAN:OK. The other rows open tools on that table.
+static void wifi_menu_cb(void* context, uint32_t index) {
+    Ghost5App* app = context;
+    Ghost5Scene dest = wifiMenuScene;
+    switch(index) {
+    case WifiHubScan:
+        dest = scanNetworksScene;
+        break;
+    case WifiHubList:
+        dest = listNetworksScene;
+        break;
+    case WifiHubMap:
+        dest = channelAnalyzerScene;
+        break;
+    case WifiHubAudit:
+        dest = auditSelectScene;
+        break;
+    case WifiHubHandshake:
+        dest = handshakeSelectScene;
+        break;
+    case WifiHubPmkid:
+        dest = pmkidSelectScene;
+        break;
+    default:
+        return;
+    }
+    app->wifi_hub_sel = index;
+    scene_manager_next_scene(app->scene_manager, dest);
+}
+
+void wifi_menu_scene_on_enter(void* context) {
+    Ghost5App* app = context;
+    submenu_reset(app->submenu);
+    submenu_set_header(app->submenu, "Scan Wi-Fi");
+    submenu_add_item(app->submenu, "Scan now", WifiHubScan, wifi_menu_cb, app);
+    if(app->wifi_sweep_done) {
+        // Submenu keeps this pointer. GUI thread only, same pattern as the BLE hub.
+        static char ap_list_label[24];
+        snprintf(ap_list_label, sizeof(ap_list_label), "AP list %d", app->wifiCount);
+        submenu_add_item(app->submenu, ap_list_label, WifiHubList, wifi_menu_cb, app);
+    }
+    submenu_add_item(app->submenu, "Channel Map", WifiHubMap, wifi_menu_cb, app);
+    if(fw_has_cap(app, 'H')) {
+        submenu_add_item(app->submenu, "Guided Audit", WifiHubAudit, wifi_menu_cb, app);
+        submenu_add_item(app->submenu, "Handshake", WifiHubHandshake, wifi_menu_cb, app);
+        submenu_add_item(app->submenu, "PMKID", WifiHubPmkid, wifi_menu_cb, app);
+    }
+    // Home entry sets this to Scan now. A child Back keeps the row that opened it.
+    // A missing id (AP list hidden after a failed rescan) leaves the cursor on row 0.
+    submenu_set_selected_item(app->submenu, app->wifi_hub_sel);
+    view_dispatcher_switch_to_view(app->view_dispatcher, beaconListView);
+}
+
+bool wifi_menu_scene_on_event(void* context, SceneManagerEvent event) {
+    UNUSED(context);
+    UNUSED(event);
+    return false;
+}
+
+void wifi_menu_scene_on_exit(void* context) {
+    UNUSED(context);
+}
+
 void (*const Ghost5App_scene_on_enter_handlers[])(void*) = {
     splash_scene_on_enter,
     main_menu_scene_on_enter,
@@ -6322,11 +7257,18 @@ void (*const Ghost5App_scene_on_enter_handlers[])(void*) = {
     handshake_select_scene_on_enter,
     handshake_capture_scene_on_enter,
     channel_analyzer_scene_on_enter,
+    ble_menu_scene_on_enter,
     ble_scan_scene_on_enter,
     ble_list_scene_on_enter,
     ble_info_scene_on_enter,
     gatt_probe_scene_on_enter,
     ble_raw_scene_on_enter,
+    ble_adv_lib_scene_on_enter,
+    ble_adv_del_scene_on_enter,
+    ble_adv_del_ask_scene_on_enter,
+    ble_adv_hex_scene_on_enter,
+    ble_adv_dur_scene_on_enter,
+    ble_adv_run_scene_on_enter,
     sta_list_scene_on_enter,
     pmkid_select_scene_on_enter,
     pmkid_capture_scene_on_enter,
@@ -6337,7 +7279,8 @@ void (*const Ghost5App_scene_on_enter_handlers[])(void*) = {
     badble_file_scene_on_enter,
     badble_run_scene_on_enter,
     audit_select_scene_on_enter,
-    audit_run_scene_on_enter};
+    audit_run_scene_on_enter,
+    wifi_menu_scene_on_enter};
 
 bool (*const Ghost5App_scene_on_event_handlers[])(void*, SceneManagerEvent) = {
     splash_scene_on_event,
@@ -6358,11 +7301,18 @@ bool (*const Ghost5App_scene_on_event_handlers[])(void*, SceneManagerEvent) = {
     handshake_select_scene_on_event,
     handshake_capture_scene_on_event,
     channel_analyzer_scene_on_event,
+    ble_menu_scene_on_event,
     ble_scan_scene_on_event,
     ble_list_scene_on_event,
     ble_info_scene_on_event,
     gatt_probe_scene_on_event,
     ble_raw_scene_on_event,
+    ble_adv_lib_scene_on_event,
+    ble_adv_del_scene_on_event,
+    ble_adv_del_ask_scene_on_event,
+    ble_adv_hex_scene_on_event,
+    ble_adv_dur_scene_on_event,
+    ble_adv_run_scene_on_event,
     sta_list_scene_on_event,
     pmkid_select_scene_on_event,
     pmkid_capture_scene_on_event,
@@ -6373,7 +7323,8 @@ bool (*const Ghost5App_scene_on_event_handlers[])(void*, SceneManagerEvent) = {
     badble_file_scene_on_event,
     badble_run_scene_on_event,
     audit_select_scene_on_event,
-    audit_run_scene_on_event};
+    audit_run_scene_on_event,
+    wifi_menu_scene_on_event};
 
 void (*const Ghost5App_scene_on_exit_handlers[])(void*) = {
     splash_scene_on_exit,
@@ -6394,11 +7345,18 @@ void (*const Ghost5App_scene_on_exit_handlers[])(void*) = {
     handshake_select_scene_on_exit,
     handshake_capture_scene_on_exit,
     channel_analyzer_scene_on_exit,
+    ble_menu_scene_on_exit,
     ble_scan_scene_on_exit,
     ble_list_scene_on_exit,
     ble_info_scene_on_exit,
     gatt_probe_scene_on_exit,
     ble_raw_scene_on_exit,
+    ble_adv_lib_scene_on_exit,
+    ble_adv_del_scene_on_exit,
+    ble_adv_del_ask_scene_on_exit,
+    ble_adv_hex_scene_on_exit,
+    ble_adv_dur_scene_on_exit,
+    ble_adv_run_scene_on_exit,
     sta_list_scene_on_exit,
     pmkid_select_scene_on_exit,
     pmkid_capture_scene_on_exit,
@@ -6409,7 +7367,8 @@ void (*const Ghost5App_scene_on_exit_handlers[])(void*) = {
     badble_file_scene_on_exit,
     badble_run_scene_on_exit,
     audit_select_scene_on_exit,
-    audit_run_scene_on_exit};
+    audit_run_scene_on_exit,
+    wifi_menu_scene_on_exit};
 
 static const SceneManagerHandlers Ghost5App_scene_manager_handlers = {
     .on_enter_handlers = Ghost5App_scene_on_enter_handlers,
@@ -6729,6 +7688,10 @@ void uart_process_line(FuriString* line, void* context) {
         strncpy(ev_last, cred, sizeof(ev_last) - 1);
         ev_last[sizeof(ev_last) - 1] = '\0';
         view_dispatcher_send_custom_event(app->view_dispatcher, GHOST_EVT_EV_CRED);
+    } else if(strncmp(furi_string_get_cstr(line), "BLEADVTX:OK", 11) == 0) {
+        app->bleadv_done = true;
+        app->bleadv_waiting = false;
+        view_dispatcher_send_custom_event(app->view_dispatcher, GHOST_EVT_BLEADV_DONE);
     } else if(strncmp(furi_string_get_cstr(line), "ERR:", 4) == 0) {
         // P4 contract: fw emits machine-parseable ERR:<VERB>:<code> (e.g. ERR:DEAUTH:chan).
         const char* src = furi_string_get_cstr(line) + 4; // skip "ERR:"
@@ -6738,7 +7701,13 @@ void uart_process_line(FuriString* line, void* context) {
         // pop a user-facing error for it, or merely opening an AP detail card throws a
         // dolphin error popup. Only real operation failures (ERR:DEAUTH:chan etc.) pop.
         if(strncmp(src, "UNKNOWN", 7) == 0) {
-            FURI_LOG_D(TAG, "fw ERR:UNKNOWN (unsupported verb, ignored)");
+            if(app->bleadv_waiting) {
+                app->bleadv_unsupported = true;
+                app->bleadv_waiting = false;
+                view_dispatcher_send_custom_event(app->view_dispatcher, GHOST_EVT_BLEADV_FAIL);
+            } else {
+                FURI_LOG_D(TAG, "fw ERR:UNKNOWN (unsupported verb, ignored)");
+            }
         } else {
             // Overwrite from offset 0 (not append): message is a single global buffer shown
             // by popupScene. Appending across errors piled a garbled string and, once the
@@ -6914,6 +7883,8 @@ static Ghost5App* app_alloc() {
     app->gatt_timed_out = false;
     app->scan_exported = false;
     app->scan_timed_out = false;
+    app->wifi_sweep_done = false;
+    app->wifi_hub_sel = WifiHubScan;
     app->phtml_ok = false;
     app->custom_portal_ready = false;
     app->custom_portal_load_failed = false;
@@ -6931,6 +7902,15 @@ static Ghost5App* app_alloc() {
     app->badble_last_fallback = false;
     app->badble_conn = 0;
     app->badble_notify_ready = 0;
+    app->bleadv_hex[0] = '\0';
+    app->bleadv_label[0] = '\0';
+    app->bleadv_secs = 30;
+    app->bleadv_waiting = false;
+    app->bleadv_done = false;
+    app->bleadv_unsupported = false;
+    app->bleadv_note[0] = '\0';
+    app->bleadv_del = -1;
+    app->ble_sweep_done = false;
     app->creds_path[0] = '\0';
     // 5Ghost P2: handshake capture state (buffer is lazily allocated per capture)
     app->hs_buf = NULL;
@@ -7129,6 +8109,7 @@ static Ghost5App* app_alloc() {
     app->timer = furi_timer_alloc(animation_timer_callback, FuriTimerTypePeriodic, app);
     app->splash_timer = furi_timer_alloc(ghost_splash_timer_callback, FuriTimerTypePeriodic, app);
     app->audit_timer = furi_timer_alloc(audit_timer_callback, FuriTimerTypePeriodic, app);
+    app->ssid_timer = furi_timer_alloc(ghost_ssid_timer_callback, FuriTimerTypePeriodic, app);
     return app;
 }
 
@@ -7183,6 +8164,10 @@ static void app_free(Ghost5App* app) {
         furi_timer_stop(app->audit_timer);
         furi_timer_free(app->audit_timer);
     }
+    if(app->ssid_timer) {
+        furi_timer_stop(app->ssid_timer);
+        furi_timer_free(app->ssid_timer);
+    }
 
     view_free(app->splash_view);
     view_free(app->home_view); // 5Ghost UI redesign: custom L1 home (replaced stock Menu)
@@ -7236,6 +8221,8 @@ int32_t ghost5_app(void* p) {
     Ghost5App* app = app_alloc();
     ghost_migrate_legacy_data();
     ghost_seed_portals(); // unpack bundled example portals after legacy migrate
+    ghost_seed_oui();
+    ghost_oui_load();
     Gui* gui = furi_record_open(RECORD_GUI);
     view_dispatcher_attach_to_gui(app->view_dispatcher, gui, ViewDispatcherTypeFullscreen);
 

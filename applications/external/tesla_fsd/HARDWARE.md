@@ -89,6 +89,29 @@ same ESP32/MCP2515 setups described below.
 These cars also have an **X930m** connector near the A-pillar.
 Pinout not yet confirmed — if you test it, please report in an issue.
 
+### X120 — 2020 Model 3 at the Autopilot ECU
+
+Some early builds route Party CAN cleanest at the **X120** connector on
+the Autopilot ECU, rather than X052. Confirmed by @mxkr303 (issue #191)
+on a 2020 Model 3 Standard Range Plus built in Fremont (SOP4): X120 is a
+**blue** connector in the passenger footwell behind the glove box,
+plugged into the Autopilot ECU.
+
+| X120 Pin | Wire | Signal |
+|----------|------|--------|
+| **5** | 0.13 mm² blue | **Party CAN High** |
+| **6** | 0.13 mm² white | **Party CAN Low** |
+| **9** | 2 mm² red | **12V +** |
+| **18** | 2 mm² black | **12V −** |
+
+Same 4-wire pattern (CAN + power); works with any of the ESP32/MCP2515
+setups below. Note the nag killer only reports green once the car is in
+a drive gear — that's when the EPAS starts nagging and there's a torque
+echo to answer, so a "red" nag killer status while parked is expected.
+Reported working on 2026.36 (Germany), with a rare system error that
+drops Autopilot; if you see it, a single-ID `0x370` capture while it
+happens would help pin down the cause.
+
 ### X179 — behind the rear center console (2021+ Model 3/Y)
 
 Tesla's own service/diagnostic connector. Requires removing a trim
@@ -101,10 +124,15 @@ panel behind the rear armrest. Two versions exist:
 > and a Party/Vehicle/Chassis-on-the-right layout). Model-year inference is
 > unreliable.
 >
-> **The deterministic check is the car's Service Mode → CAN Port page**, which lists
-> each pin's bus by name, keyed to the harness part number. On harness `1933903-XX`
-> (Model Y Juniper RWD, 2025, 2026.14.3), @jewelrylin pulled it from Service Mode
-> ([#100](https://github.com/hypery11/flipper-tesla-fsd/issues/100)):
+> **Start with your car's wiring diagram** in Tesla's Electrical Reference
+> ([Model 3](https://service.tesla.com/docs/Model3/ElectricalReference/),
+> [Model Y](https://service.tesla.com/docs/ModelY/ElectricalReference/)), for your
+> exact build. Where the car has it, the **Service Mode → CAN Port** page is the
+> deterministic check: it lists each pin's bus by name, keyed to the harness part
+> number. Not every car shows that page; on a 2024 Model Y it wasn't there without
+> Service+ ([#211](https://github.com/hypery11/flipper-tesla-fsd/issues/211)).
+> On harness `1933903-XX` (Model Y Juniper RWD, 2025, 2026.14.3), @jewelrylin
+> pulled it from Service Mode ([#100](https://github.com/hypery11/flipper-tesla-fsd/issues/100)):
 >
 > | X179 pin | Bus |
 > |---|---|
@@ -125,7 +153,8 @@ panel behind the rear armrest. Two versions exist:
 > T-2CAN), and it works ([#100](https://github.com/hypery11/flipper-tesla-fsd/issues/100)).
 > A single-CAN board tapped on the wrong pair (Chassis or Vehicle) gives the nag
 > killer nothing to act on — the common cause of "nag killer does nothing on HW4."
-> Confirm which pin is Party on your harness via **Service Mode → CAN Port**.
+> Confirm which pin is Party on your harness with your car's wiring diagram (or
+> **Service Mode → CAN Port**, where available).
 
 #### X179 20-pin (2021–2023 Model 3/Y)
 
@@ -153,8 +182,9 @@ panel behind the rear armrest. Two versions exist:
 
 **4 separate CAN bus pairs** on one connector. Pin 13/14 is what
 single-bus aftermarket kits connect to. These labels come from early
-community notes and the pin→bus map varies by harness, so check
-**Service Mode → CAN Port** on your car before wiring.
+community notes and the pin→bus map varies by harness, so check your
+car's wiring diagram before wiring (or **Service Mode → CAN Port**, where
+available).
 
 #### 26-pin rear connector — two variants
 
@@ -175,7 +205,7 @@ Highland / Juniper builds.
 
 | Pin | Signal | Notes |
 |-----|--------|-------|
-| **13** | **CAN-H** | Third CAN pair (older notes: "Bus 6") — check Service Mode → CAN Port |
+| **13** | **CAN-H** | Third CAN pair (older notes: "Bus 6") — check your car's wiring diagram |
 | **14** | **CAN-L** | Third CAN pair |
 | **15** | **+12V** | Power (red wire, 2mm²) |
 | 18 | CAN-H | Vehicle CAN (blue wire) |
@@ -209,7 +239,18 @@ EU Model Y (pre-Juniper, post-April-2024 production) running 2026.14.3
 | 15 | +12V (unchanged) |
 | 26 | GND (unchanged) |
 
-This is a **single empirical data point** and may not generalise to
+A second car points the same way for 18/19: @nobless's Fremont-built
+Model Y AWD (2024-07) has Vehicle CAN there too. A Listen-Only capture
+from that pair carries `0x334`, `0x293`, `0x3C2`, the BMS frames,
+`0x25D` and `0x7FF`, and no `0x370`, `0x257`, `0x118` or `0x398`
+(issue [#211](https://github.com/hypery11/flipper-tesla-fsd/issues/211)).
+The other pairs on that car were not probed. On a tap like this the
+features that need Party CAN have nothing to work with (nag killer, HW
+detection from `0x398`), and Acceleration Mode sees the car's `0x334`
+but cannot latch a new map, because its standstill check reads `0x257`
+or `0x118`.
+
+The DoIP rows above are a **single empirical data point** and may not generalise to
 every post-April-2024 build. @TianzeWang notes (issue [#52](https://github.com/hypery11/flipper-tesla-fsd/issues/52))
 that Tesla's [Model Y Electrical Reference](https://service.tesla.com/docs/ModelY/ElectricalReference/)
 distinguishes between **Berlin Juniper (SOP8)** and **Shanghai Juniper
@@ -254,7 +295,8 @@ build is:
 Older notes called this pair "Bus 6" and read it as a gateway-forwarded
 mix of buses. On harness `1933903-XX` the car's Service Mode lists it as
 **Chassis CAN** (see the X179 note above). The pin→bus map varies, so
-check **Service Mode → CAN Port** on your own car. Community captures
+check the wiring diagram for your own car (or **Service Mode → CAN Port**,
+where available). Community captures
 have shown these frames on X179 pin 13/14:
 
 - `0x3FD` UI_autopilotControl (FSD gate)
@@ -426,11 +468,21 @@ The T-2CAN has **two independent CAN controllers — one native ESP32-S3
 TWAI and one MCP2515 (SPI)** — plus dual screw terminals, 12–24V input,
 WiFi, BLE, QWIIC, and USB-C. The `lilygo-t2can` build drives both (the
 `CAN_DRIVER_T2CAN_DUAL` driver): frames from either channel are processed,
-and modified frames go back out on the bus they came from. Wire one channel
+and modified frames go back out on the bus they came from. The Continuous AP
+`0x229` press, which continues the car's own `0x229` counter, likewise goes
+out only on a bus where the car's `0x229` is live. Wire one channel
 to the pair carrying `0x3FD` and the other to a second X179 pair, e.g. Party
 CAN (pins 2/3) for the nag killer
 ([#100](https://github.com/hypery11/flipper-tesla-fsd/issues/100)). Check
-**Service Mode → CAN Port** for which pair is which on your harness.
+your car's wiring diagram (or **Service Mode → CAN Port**, where available)
+for which pair is which on your harness.
+
+The same product page also sells the **T-2CAN FD (H784-A)**, with an
+MCP2518FD in place of the MCP2515. It needs the `lilygo-t2can-fd` build,
+which runs that channel as classic CAN 2.0 at 500 kbps; the
+`lilygo-t2can` image boots on it but its SPI channel stays dead. The FD
+build has not been confirmed on real hardware yet
+([#206](https://github.com/hypery11/flipper-tesla-fsd/issues/206)).
 
 This is the recommended board for dual-bus setups.
 
@@ -558,8 +610,9 @@ OBD-II wiring (Party CAN only):
 | Pin 14 | CAN-L | CAN-L |
 | Pin 4/5 | GND | GND |
 
-The Flipper can also be wired to X179 instead of OBD-II (check
-**Service Mode → CAN Port** for which pair is which), but the cable run
+The Flipper can also be wired to X179 instead of OBD-II (check your car's
+wiring diagram, or **Service Mode → CAN Port** where available, for which
+pair is which), but the cable run
 from the rear console to the Flipper is long.
 
 ### MCP2515 MISO 5V to 3.3V voltage divider

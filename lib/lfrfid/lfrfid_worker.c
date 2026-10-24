@@ -34,6 +34,8 @@ LFRFIDWorker* lfrfid_worker_alloc(ProtocolDict* dict) {
     // Honouring the user's setting is opt-in (see lfrfid_worker_set_write_targets), so a caller
     // that never sets one gets the default rather than everything.
     worker->write_target_mask = lfrfid_write_targets_default();
+    worker->password = 0;
+    worker->password_set = false;
 
     worker->thread = furi_thread_alloc_ex("LfrfidWorker", 2048, lfrfid_worker_thread, worker);
 
@@ -72,6 +74,12 @@ void lfrfid_worker_set_write_targets(LFRFIDWorker* worker, LFRFIDWriteTargetMask
     worker->write_target_mask = mask & LFRFID_WRITE_TARGET_MASK_ALL;
 }
 
+void lfrfid_worker_set_password(LFRFIDWorker* worker, uint32_t password) {
+    furi_check(worker);
+    worker->password = password;
+    worker->password_set = true;
+}
+
 void lfrfid_worker_write_start(
     LFRFIDWorker* worker,
     LFRFIDProtocol protocol,
@@ -90,6 +98,13 @@ void lfrfid_worker_write_and_set_pass_start(
     LFRFIDWorkerWriteCallback callback,
     void* context) {
     furi_assert(worker->mode_index == LFRFIDWorkerIdle);
+    // Older RFID apps passed the password through their private callback context.
+    // They cannot supply the new explicit setter, so reject the operation before
+    // scheduling any RF work. Zero remains valid when it was explicitly selected.
+    if(!worker->password_set) {
+        if(callback) callback(LFRFIDWorkerWriteProtocolCannotBeWritten, context);
+        return;
+    }
     worker->protocol = protocol;
     worker->write_cb = callback;
     worker->cb_ctx = context;

@@ -1,4 +1,5 @@
 #include "sr_parse_marauder.h"
+#include "sr_dialect.h"
 
 #include <limits.h>
 #include <string.h>
@@ -56,6 +57,7 @@ static const char kQual[] = "Qual: ";
 static const char kUp[] = "Up: ";
 static const char kRank[] = "Rank: ";
 static const char kCfg[] = "Cfg: ";
+static const char kBand[] = "Band: ";
 
 typedef struct {
     const char* p;
@@ -830,6 +832,32 @@ static bool cfg_parse(const char* line, size_t len, SrCfgInfo* out) {
     return true;
 }
 
+/*
+ * "Band: w24=<u32> w5=<u32>". Both fields required. p != len rejects a tail.
+ * A short line falls through to Unknown so older firmware is unchanged.
+ */
+static bool band_parse(const char* line, size_t len, SrBandInfo* out) {
+    size_t p = sizeof(kBand) - 1U;
+    uint32_t w24 = 0;
+    uint32_t w5 = 0;
+
+    if(line == NULL || out == NULL || len < p || memcmp(line, kBand, p) != 0) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, "w24=", 4U) || !scan_u32(line, len, &p, &w24)) {
+        return false;
+    }
+    if(!scan_lit(line, len, &p, " w5=", 4U) || !scan_u32(line, len, &p, &w5)) {
+        return false;
+    }
+    if(p != len) {
+        return false;
+    }
+    out->w24 = w24;
+    out->w5 = w5;
+    return true;
+}
+
 static bool probe_n(const char* line, size_t len, SrFirmwareInfo* out) {
     static const char kFw[] = "Firmware: ";
     static const char kVer[] = "Version: ";
@@ -848,7 +876,8 @@ static bool probe_n(const char* line, size_t len, SrFirmwareInfo* out) {
         /* Firmware: starts a new #info identity block. Drop the previous
          * block's Diag: so a later firmware_rev bump cannot adopt with a
          * stale diag_state (C1/C2). Version:/Hardware:/ESP-IDF: must not
-         * do this — Diag: follows them in the same reply. */
+         * do this — Diag: follows them in the same reply.
+         * sigroam_cap is not cleared: it is a peer capability, not this block. */
         out->diag_seen = false;
         out->diag_state = 0;
         out->diag_seal = 0;
@@ -1045,6 +1074,9 @@ static SrParseResult marauder_feed(SrParser* parser, const char* line, size_t le
 
     parser->lines_seen++;
     memset(out, 0, sizeof(*out));
+    /* Before dispatch, so a Diag:/Sess: in this line sees the #sigroam arm
+     * from a previous line, and the Firmware event copies the latch. */
+    sr_sigroam_cap_observe(&parser->fw_partial.sigroam_cap, line, len);
 
     /* D3 dispatch order; first match returns. */
     if(len == 0) {
@@ -1132,6 +1164,11 @@ static SrParseResult marauder_feed(SrParser* parser, const char* line, size_t le
 
     if(cfg_parse(line, len, &out->u.cfg)) {
         out->kind = SrEventCfg;
+        return SrParseOk;
+    }
+
+    if(band_parse(line, len, &out->u.band)) {
+        out->kind = SrEventBand;
         return SrParseOk;
     }
 

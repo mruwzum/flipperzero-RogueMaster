@@ -1,3 +1,24 @@
+v1.7:
+
+- Added RGB LED feedback for single-tag reads and writes: blue while reading, magenta while writing, green after a successful read, cyan after a successful write, and red on failure.
+- Improved TID reads on TID-changeable tags with automatic 6/8/4/3/2-word fallback windows, 128-bit TID support, and EPC-filter recovery with tag verification.
+- Included upstream fixes for Inventory TID reads on factory-default Impinj M830/M850 tags, Lock/Unlock timeout recovery, and Clear confirmation handling.
+- Added UCM601NC error-code names and clearer tag-operation failure messages.
+- Tag Operation now re-reads the selected bank with Up, loads cached bank data when switching with Left, and pages long data with Down.
+- Added per-bank memory caching so switching between EPC, TID, User, and Reserved does not force another tag read.
+- Fixed the EPC size badge to count only EPC data, excluding PC and CRC.
+- Access Keys now display the stored 32-bit key directly with aligned fixed-width digits.
+- Added scrollbars to the Tag Tools, EPC Tools, and Settings submenus.
+- Added wrap-around navigation to all selectable lists and menus.
+
+v1.6:
+
+- Added EPC Filter with case-insensitive ASCII matching and sound feedback only for matching tags.
+- Added a fullscreen filter list and signal-strength bars to Inventory and EPC Filter.
+- Improved signal display with smoothing, stale-signal clearing, and more stable list ordering.
+- Refined EPC ASCII capture and display, the filter keyboard, and Saved Tags navigation.
+- Added reader controls and paged reader details.
+
 v1.5:
 
 - Reorganized the home screen into Inventory, Tag Tools, EPC Tools, Saved Tags, and Settings.
