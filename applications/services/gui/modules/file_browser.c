@@ -60,13 +60,17 @@ static void BrowserItem_t_init_set(BrowserItem_t* obj, const BrowserItem_t* src)
 }
 
 static void BrowserItem_t_set(BrowserItem_t* obj, const BrowserItem_t* src) {
+    if(obj == src) return;
     obj->type = src->type;
     furi_string_set(obj->name, src->name);
     furi_string_set(obj->display_name, src->display_name);
-    if(src->custom_icon_data) {
-        memcpy(obj->custom_icon_data, src->custom_icon_data, CUSTOM_ICON_MAX_SIZE);
-    } else {
+    if(obj->custom_icon_data) {
+        free(obj->custom_icon_data);
         obj->custom_icon_data = NULL;
+    }
+    if(src->custom_icon_data) {
+        obj->custom_icon_data = malloc(CUSTOM_ICON_MAX_SIZE);
+        memcpy(obj->custom_icon_data, src->custom_icon_data, CUSTOM_ICON_MAX_SIZE);
     }
 }
 
@@ -76,6 +80,18 @@ static void BrowserItem_t_clear(BrowserItem_t* obj) {
     if(obj->custom_icon_data) {
         free(obj->custom_icon_data);
     }
+}
+
+// ASCII case-fold compare, same order as furi_string_cmpi without its 4 libc calls per char
+static int browser_item_cmpi(const char* a, const char* b) {
+    unsigned char ca, cb;
+    do {
+        ca = (unsigned char)*a++;
+        cb = (unsigned char)*b++;
+        if((ca >= 'A') && (ca <= 'Z')) ca += 'a' - 'A';
+        if((cb >= 'A') && (cb <= 'Z')) cb += 'a' - 'A';
+    } while((ca == cb) && (ca != '\0'));
+    return (int)ca - (int)cb;
 }
 
 static int BrowserItem_t_cmp(const BrowserItem_t* a, const BrowserItem_t* b) {
@@ -95,7 +111,8 @@ static int BrowserItem_t_cmp(const BrowserItem_t* a, const BrowserItem_t* b) {
         }
     }
 
-    return furi_string_cmpi(a->display_name, b->display_name);
+    return browser_item_cmpi(
+        furi_string_get_cstr(a->display_name), furi_string_get_cstr(b->display_name));
 }
 
 #define M_OPL_BrowserItem_t()                 \
@@ -146,6 +163,7 @@ typedef struct {
     const Icon* file_icon;
     bool hide_ext;
     size_t scroll_counter;
+    bool draw_seen;
 
     int32_t button_held_for_ticks;
 } FileBrowserModel;
@@ -170,7 +188,20 @@ static void browser_long_load_cb(void* context);
 static void file_browser_scroll_timer_callback(void* context) {
     furi_check(context);
     FileBrowser* browser = context;
-    with_view_model(browser->view, FileBrowserModel * model, { model->scroll_counter++; }, true);
+    bool animate = false;
+    with_view_model(
+        browser->view,
+        FileBrowserModel * model,
+        {
+            // Nothing drew the frame asked for last tick, so this view is covered:
+            // stop asking, every request repaints whatever is on top of us
+            animate = model->draw_seen;
+            if(animate) {
+                model->scroll_counter++;
+                model->draw_seen = false;
+            }
+        },
+        animate);
 }
 
 static void file_browser_view_enter_callback(void* context) {
@@ -491,7 +522,8 @@ static void
             {
                 if(model->item_cnt <= BROWSER_SORT_THRESHOLD) {
                     FuriString* selected = NULL;
-                    if(model->item_idx > 0) {
+                    if((model->item_idx > 0) &&
+                       ((size_t)model->item_idx < items_array_size(model->items))) {
                         selected = furi_string_alloc_set(
                             items_array_get(model->items, model->item_idx)->name);
                     }
@@ -653,6 +685,9 @@ static void browser_draw_list(Canvas* canvas, FileBrowserModel* model) {
 
 static void file_browser_view_draw_callback(Canvas* canvas, void* _model) {
     FileBrowserModel* model = _model;
+
+    // view_draw releases the model without an update, so this cannot retrigger itself
+    model->draw_seen = true;
 
     if(model->folder_loading) {
         browser_draw_loading(canvas, model);

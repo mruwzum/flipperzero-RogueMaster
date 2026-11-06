@@ -6,6 +6,7 @@
 #include <notification/notification_messages.h>
 #include <flipper_format/flipper_format.h>
 #include <flipper_format/flipper_format_i.h>
+#include <toolbox/name_generator.h>
 
 #define TAG "SubGhzWarDriving_i"
 
@@ -20,14 +21,47 @@ void subghz_blink_stop(SubGhz* subghz) {
     notification_message(subghz->notifications, &sequence_blink_stop);
 }
 
+// Deleting old signals makes room for a send as well as for a reception: the list is what
+// is holding the heap, so the oldest records go until the block this one needs can be held.
+// Only records older than the one being sent are dropped, so it is never the one that goes,
+// and the chosen index moves down with them so it still points at the same signal
+static bool subghz_tx_make_room(SubGhz* subghz, FlipperFormat* flipper_format) {
+    if(!subghz->last_settings->delete_old_signals) return false;
+
+    FuriString* protocol = furi_string_alloc();
+    bool freed = false;
+    if(flipper_format_rewind(flipper_format) &&
+       flipper_format_read_string(flipper_format, "Protocol", protocol)) {
+        const size_t need = subghz_wardriving_txrx_tx_block_need(furi_string_get_cstr(protocol));
+        // Every delete asks for the block again, so this stops as soon as one is held
+        while((subghz->idx_menu_chosen > 0) && (subghz_wardriving_txrx_tx_block_size() < need)) {
+            subghz_wardriving_history_delete_item(subghz->history, 0);
+            subghz_view_receiver_delete_item(subghz->subghz_receiver, 0);
+            subghz->idx_menu_chosen--;
+            freed = true;
+        }
+    }
+    furi_string_free(protocol);
+    return freed;
+}
+
 bool subghz_tx_start(SubGhz* subghz, FlipperFormat* flipper_format) {
-    switch(subghz_wardriving_txrx_tx_start(subghz->txrx, flipper_format)) {
+    SubGhzTxRxStartTxState state = subghz_wardriving_txrx_tx_start(subghz->txrx, flipper_format);
+    if((state == SubGhzTxRxStartTxStateErrorNoMemory) &&
+       subghz_tx_make_room(subghz, flipper_format)) {
+        state = subghz_wardriving_txrx_tx_start(subghz->txrx, flipper_format);
+    }
+    switch(state) {
     case SubGhzTxRxStartTxStateErrorParserOthers:
         dialog_message_show_storage_error(
             subghz->dialogs, "Error in protocol\nparameters\ndescription");
         break;
     case SubGhzTxRxStartTxStateErrorOnlyRx:
         subghz_dialog_message_freq_error(subghz, true);
+        break;
+    case SubGhzTxRxStartTxStateErrorNoMemory:
+        notification_message(subghz->notifications, &sequence_error);
+        subghz_dialog_message_no_memory(subghz);
         break;
 
     default:
@@ -54,6 +88,23 @@ void subghz_dialog_message_freq_error(SubGhz* subghz, bool only_rx) {
     dialog_message_set_icon(message, &I_WarningDolphinFlip_45x42, 83, 22);
 
     dialog_message_show(dialogs, message);
+    dialog_message_free(message);
+}
+
+void subghz_dialog_message_no_memory(SubGhz* subghz) {
+    DialogMessage* message = dialog_message_alloc();
+
+    dialog_message_set_header(message, "Not enough memory", 64, 3, AlignCenter, AlignTop);
+    dialog_message_set_text(
+        message,
+        "Signal can only\nbe saved.\nDelete old signals\nto send it.",
+        3,
+        20,
+        AlignLeft,
+        AlignTop);
+    dialog_message_set_icon(message, &I_WarningDolphinFlip_45x42, 83, 22);
+
+    dialog_message_show(subghz->dialogs, message);
     dialog_message_free(message);
 }
 
@@ -468,4 +519,31 @@ void subghz_rx_key_state_set(SubGhz* subghz, SubGhzRxKeyState state) {
 SubGhzRxKeyState subghz_rx_key_state_get(SubGhz* subghz) {
     furi_assert(subghz);
     return subghz->rx_key_state;
+}
+
+bool subghz_wardriving_autosave_one(SubGhz* subghz) {
+    SubGhzWarDrivingHistorySnapshot snapshot;
+    if(!subghz_wardriving_history_take_autosave(subghz->history, &snapshot)) return false;
+
+    char file[SUBGHZ_MAX_LEN_NAME] = {0};
+    const char* prefix = subghz->last_settings->protocol_file_names ? snapshot.protocol_name :
+                                                                      SUBGHZ_APP_FILENAME_PREFIX;
+    name_generator_make_detailed_datetime(file, sizeof(file), prefix, &snapshot.datetime, true);
+    FuriString* path = furi_string_alloc_set(SUBGHZ_WARDR_APP_FOLDER "/autosaved");
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    storage_get_next_filename(
+        storage,
+        SUBGHZ_WARDR_APP_FOLDER "/autosaved",
+        file,
+        SUBGHZ_APP_FILENAME_EXTENSION,
+        path,
+        sizeof(file));
+    strlcpy(file, furi_string_get_cstr(path), sizeof(file));
+    furi_string_printf(
+        path, "%s/%s%s", SUBGHZ_WARDR_APP_FOLDER "/autosaved", file, SUBGHZ_APP_FILENAME_EXTENSION);
+    furi_record_close(RECORD_STORAGE);
+    subghz_save_protocol_to_file(subghz, snapshot.data, furi_string_get_cstr(path));
+    furi_string_free(path);
+    subghz_wardriving_history_release_autosave(subghz->history, &snapshot);
+    return true;
 }

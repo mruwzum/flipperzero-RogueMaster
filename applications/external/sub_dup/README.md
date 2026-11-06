@@ -24,6 +24,9 @@ An application for Flipper Zero to identify, manage, and clean up duplicate `*.s
   the scan.
 - **Delete** removes the selected file from the SD card. If the delete fails, the file stays
   in the list and a "Delete failed" message is shown instead.
+  Groups are candidates found by CRC32 and size. On confirmation, the selected file is compared
+  byte for byte and must still match another surviving copy and both scanned fingerprints.
+  A changed, missing or unreadable copy cancels deletion with "Cannot verify / Scan again".
 
 ## Development Setup
 
