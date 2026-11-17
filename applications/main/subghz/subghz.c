@@ -66,7 +66,7 @@ static void subghz_rpc_command_callback(const RpcAppSystemEvent* event, void* co
 static void subghz_load_custom_presets(SubGhzSetting* setting) {
     furi_assert(setting);
 
-    static const char* presets[][2] = {
+    static const char* const presets[][2] = {
         // FM95
         {"FM95",
          "02 0D 0B 06 08 32 07 04 14 00 13 02 12 04 11 83 10 67 15 24 18 18 19 16 1D 91 1C 00 1B 07 20 FB 22 10 21 56 00 00 C0 00 00 00 00 00 00 00"},
@@ -507,8 +507,7 @@ int32_t subghz_add_manually(void* p) {
     UNUSED(subghz_rpc_command_callback);
     UNUSED(subghz_load_custom_presets);
 
-    scene_manager_set_scene_state(
-        subghz->scene_manager, SubGhzSceneSetType, add_manually_scene_state);
+    subghz->add_manually_scene_state = add_manually_scene_state;
 
     view_dispatcher_attach_to_gui(
         subghz->view_dispatcher, subghz->gui, ViewDispatcherTypeFullscreen);

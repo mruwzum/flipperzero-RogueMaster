@@ -1,6 +1,12 @@
 # PC Health Remote
 
+<p align="center"><img src="docs/brand/banner.png" alt="PC Health Remote" width="100%"></p>
+
 **Температуры и нагрузка вашего ПК на Flipper Zero, с оповещениями вибро, звуком и светодиодом.**
+
+**Новое в v1.1: ПК сам напишет вам в Telegram до перегрева, Flipper не нужен.** Бесплатно для 1 ПК:
+[откройте @PCHealthRemoteBot](https://t.me/PCHealthRemoteBot?start=src_github_readme), отправьте `/link`, затем
+`pc-health-remote.exe --link-telegram КОД`.
 
 <p align="center">
   <img src="docs/img/1_temps.png" width="19%" alt="Temps">
@@ -38,9 +44,9 @@ LibreHardwareMonitor.
 Подробно: [docs/SETUP.md](docs/SETUP.md) (на английском).
 
 1. Установите приложение на Flipper: `pc_health_remote.fap` из
-   [релизов](https://github.com/vladatman/pc-health-remote/releases) в `/ext/apps/Bluetooth/` (например, через
+   [релизов](https://github.com/ataman-lab/pc-health-remote/releases) в `/ext/apps/Bluetooth/` (например, через
    qFlipper, "Install from file") или из каталога приложений.
-2. Скачайте exe для ПК со страницы [релизов](https://github.com/vladatman/pc-health-remote/releases)
+2. Скачайте exe для ПК со страницы [релизов](https://github.com/ataman-lab/pc-health-remote/releases)
    и положите в постоянную папку.
 3. Один раз выполните сопряжение: откройте приложение на Flipper и в PowerShell запустите
    `.\pc-health-remote.exe pair`. На Flipper появится "Verify code" - нажмите OK на Flipper.
@@ -51,5 +57,23 @@ LibreHardwareMonitor.
 
 Для точной температуры CPU и оборотов вентилятора запустите LibreHardwareMonitor (в автозагрузке).
 Если связи нет: `pc-health-remote.exe unpair`, затем снова `pair`. Логи: `%APPDATA%\pc-health-remote\`.
+
+## Уведомления в Telegram (бета)
+
+Те же алерты на телефон в Telegram, Flipper не нужен. Бот: **@PCHealthRemoteBot**.
+
+1. Откройте бота и отправьте `/link`. Придёт код из 6 символов (действует 10 минут).
+2. На ПК выполните `.\pc-health-remote.exe --link-telegram <КОД>`.
+3. Перезапустите бэкенд. Уведомления приходят так: `🔥 GAMING-PC: CPU temp 92°C (limit 90°C)`.
+
+| | Бесплатно | Pro |
+|---|---|---|
+| ПК | 1 | 5 |
+| Уведомлений в сутки | 10 | без лимита |
+| Цена | 0 | 99 Telegram Stars / 30 дней (`/pro`) |
+
+Подробности и приватность: [docs/TELEGRAM.md](docs/TELEGRAM.md) (на английском).
+
+Связь: [support@pchealthremote.com](mailto:support@pchealthremote.com) (ошибки и идеи можно и в [issues](https://github.com/ataman-lab/pc-health-remote/issues)).
 
 Протокол: [docs/PROTOCOL.md](docs/PROTOCOL.md). Лицензия: [MIT](LICENSE).

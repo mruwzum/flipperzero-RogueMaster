@@ -9,6 +9,39 @@
 
 #define ASSETS_DIR "assets"
 
+/* Both the resident launcher and Archive FAP compile this shared source. */
+const char* const known_ext[ArchiveFileTypeT5577 + 1] = {
+    // clang-format off
+    [ArchiveFileTypeIButton] = ".ibtn",
+    [ArchiveFileTypeNFC] = ".nfc",
+    [ArchiveFileTypeSubGhz] = ".sub",
+    [ArchiveFileTypeLFRFID] = ".rfid",
+    [ArchiveFileTypeInfrared] = ".ir",
+    [ArchiveFileTypeSubghzPlaylist] = ".txt",
+    [ArchiveFileTypeSubghzRemote] = ".txt",
+    [ArchiveFileTypeInfraredRemote] = ".txt",
+    [ArchiveFileTypeBadUsb] = ".txt",
+    [ArchiveFileTypeMP3] = ".mp3",
+    [ArchiveFileTypeWAV] = ".wav",
+    [ArchiveFileTypeMag] = ".mag",
+    [ArchiveFileTypeCrossRemote] = ".xr",
+    [ArchiveFileTypePicopass] = ".picopass",
+    [ArchiveFileTypeU2f] = "?",
+    [ArchiveFileTypeApplication] = ".fap",
+    [ArchiveFileTypeJS] = ".js",
+    [ArchiveFileTypeSearch] = "*",
+    [ArchiveFileTypeUpdateManifest] = ".fuf",
+    [ArchiveFileTypeDiskImage] = ".img",
+    [ArchiveFileTypeFolder] = "?",
+    [ArchiveFileTypeProtoPirate] = ".psf",
+    [ArchiveFileTypeUnknown] = "*",
+    [ArchiveFileTypeAppOrJs] = "?", // Legacy filter value, not a file type.
+    [ArchiveFileTypeLoading] = "?",
+    [ArchiveFileTypeT5577] = T5577_FILE_EXTENSION,
+    [ArchiveFileTypeSetting] = "?",
+    // clang-format on
+};
+
 void archive_set_file_type(ArchiveFile_t* file, const char* path, bool is_folder, bool is_app) {
     furi_assert(file);
 
@@ -153,6 +186,13 @@ FS_Error archive_copy_rename_file_or_dir(
         error = FSE_INVALID_NAME;
     } else if(!copy && !strcmp(src_path, furi_string_get_cstr(dst_path))) {
         error = FSE_EXIST;
+    } else if(
+        !copy &&
+        storage_common_equivalent_path(fs_api, src_path, furi_string_get_cstr(dst_path))) {
+        // Same entry under a different spelling, as when only the case of the name changes:
+        // the free-name search below would see the entry itself as a collision and rename to
+        // a numbered name instead, so the rename goes straight to storage.
+        error = storage_common_rename_safe(fs_api, src_path, furi_string_get_cstr(dst_path));
     } else {
         if(find_name && storage_common_exists(fs_api, furi_string_get_cstr(dst_path))) {
             FuriString* dir_path = furi_string_alloc();

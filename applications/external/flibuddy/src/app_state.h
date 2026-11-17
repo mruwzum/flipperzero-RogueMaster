@@ -73,11 +73,10 @@
  * lookup finds the spool (not one created on the scan, not a fresh lookup
  * replacing a result); Back from it shows the result.
  *
- * Get app (Waiting's OK) shows where the phone app comes from. The caller
- * sends AppEventStart once it has set the stored settings: on the first
- * run (app_settings_first_run_done() false) it opens Get app and records
- * that, with AppEffectSaveSettings; the first host to connect records it
- * too. The reader runs there as on Waiting.
+ * Get app (Waiting's OK) shows where the phone app comes from; the reader
+ * runs there as on Waiting. The app starts on Waiting: the caller sends
+ * AppEventStart once it has set the stored settings, and it changes
+ * nothing.
  *
  * The caller sets s->settings and s->connection from the stored settings
  * after app_state_init(). Events about a transport (a host connected over
@@ -102,12 +101,12 @@
 #define APP_SAVED_MS          1300u
 #define APP_TOAST_MS          3000u
 #define APP_READ_RETRY_MS     1500u /* Error{ReadFailed} returns to Ready */
-#define APP_DETAILS_SHOWN     5u 
+#define APP_DETAILS_SHOWN     5u
 /* Tag details rows on screen; ▼ stops at the last (ui_details_count) */
-#define APP_LIST_ROWS     4 /* visible rows of Menu and Settings */
-#define APP_MENU_MAX      6
-#define APP_WEIGHT_DIGITS 4
-#define APP_RECENT_MAX    6
+#define APP_LIST_ROWS         4 /* visible rows of Menu and Settings */
+#define APP_MENU_MAX          6
+#define APP_WEIGHT_DIGITS     4
+#define APP_RECENT_MAX        6
 
 typedef enum {
     AppScreenWaiting, /* no host */
@@ -220,7 +219,7 @@ typedef enum {
     AppEventBleStatus, /* .ble */
     AppEventTransportFailed, /* the transport `via` did not open */
     AppEventOtherVersion, /* .version: a host hello of another protocol version, 0 clears */
-    AppEventStart, /* the stored settings are set: the first run opens Get app */
+    AppEventStart, /* the stored settings are set; changes nothing */
 } AppEventType;
 
 typedef struct {

@@ -8,6 +8,7 @@
 #include <lib/subghz/protocols/protocol_items.h>
 #include <flipper_format/flipper_format_i.h>
 #include <lib/subghz/devices/devices.h>
+#include <lib/subghz/devices/cc1101_int/cc1101_int_interconnect.h>
 #include <lib/subghz/devices/cc1101_configs.h>
 #include <applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h>
 
@@ -440,6 +441,27 @@ MU_TEST(subghz_decoder_came_test) {
         "Test decoder " SUBGHZ_PROTOCOL_CAME_NAME " error\r\n");
 }
 
+MU_TEST(subghz_decoder_proteco_test) {
+    mu_assert(
+        subghz_decoder_test(
+            EXT_PATH("unit_tests/subghz/proteco_raw.sub"), SUBGHZ_PROTOCOL_PROTECO_NAME),
+        "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " error\r\n");
+}
+
+MU_TEST(subghz_decoder_proteco_b_test) {
+    mu_assert(
+        subghz_decoder_test(
+            EXT_PATH("unit_tests/subghz/proteco_b_raw.sub"), SUBGHZ_PROTOCOL_PROTECO_NAME),
+        "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " B error\r\n");
+}
+
+MU_TEST(subghz_decoder_proteco_c_test) {
+    mu_assert(
+        subghz_decoder_test(
+            EXT_PATH("unit_tests/subghz/proteco_c_raw.sub"), SUBGHZ_PROTOCOL_PROTECO_NAME),
+        "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " C error\r\n");
+}
+
 MU_TEST(subghz_decoder_came_twee_test) {
     mu_assert(
         subghz_decoder_test(
@@ -810,6 +832,12 @@ MU_TEST(subghz_encoder_came_test) {
         "Test encoder " SUBGHZ_PROTOCOL_CAME_NAME " error\r\n");
 }
 
+MU_TEST(subghz_encoder_proteco_test) {
+    mu_assert(
+        subghz_encoder_test(EXT_PATH("unit_tests/subghz/proteco.sub")),
+        "Test encoder " SUBGHZ_PROTOCOL_PROTECO_NAME " error\r\n");
+}
+
 MU_TEST(subghz_encoder_came_twee_test) {
     mu_assert(
         subghz_encoder_test(EXT_PATH("unit_tests/subghz/came_twee.sub")),
@@ -1027,15 +1055,27 @@ MU_TEST(subghz_device_registry_test) {
         "card, in apps_data/subghz/plugins?\r\n");
 }
 
+MU_TEST(subghz_device_begin_internal_test) {
+    // The internal radio has no begin() of its own. Starting it must still succeed, or the
+    // CLI `subghz rx`, `tx` and `tx_from_file` stop at "Device 0 failed to start"
+    const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+    mu_assert(device, "Internal radio device is not registered");
+    mu_assert(subghz_devices_begin(device), "Internal radio begin() failed");
+}
+
 MU_TEST_SUITE(subghz) {
     subghz_test_init();
     MU_RUN_TEST(subghz_device_registry_test);
+    MU_RUN_TEST(subghz_device_begin_internal_test);
     MU_RUN_TEST(subghz_keystore_test);
 
     MU_RUN_TEST(subghz_hal_async_tx_test);
 
     MU_RUN_TEST(subghz_decoder_came_atomo_test);
     MU_RUN_TEST(subghz_decoder_came_test);
+    MU_RUN_TEST(subghz_decoder_proteco_test);
+    MU_RUN_TEST(subghz_decoder_proteco_b_test);
+    MU_RUN_TEST(subghz_decoder_proteco_c_test);
     MU_RUN_TEST(subghz_decoder_came_twee_test);
     MU_RUN_TEST(subghz_decoder_faac_slh_test);
     MU_RUN_TEST(subghz_decoder_gate_tx_test);
@@ -1088,6 +1128,7 @@ MU_TEST_SUITE(subghz) {
 
     MU_RUN_TEST(subghz_encoder_princeton_test);
     MU_RUN_TEST(subghz_encoder_came_test);
+    MU_RUN_TEST(subghz_encoder_proteco_test);
     MU_RUN_TEST(subghz_encoder_came_twee_test);
     MU_RUN_TEST(subghz_encoder_gate_tx_test);
     MU_RUN_TEST(subghz_encoder_nice_flo_test);

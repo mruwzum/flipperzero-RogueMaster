@@ -3,7 +3,7 @@
 #include <lib/toolbox/args.h>
 #include <toolbox/pipe.h>
 #include <cli/cli_main_commands.h>
-#include <toolbox/cli/cli_registry.h>
+#include <toolbox/cli/cli_command.h>
 
 #include <ble/ble.h>
 #include "bt_service/bt.h"
@@ -229,4 +229,4 @@ static void execute(PipeSide* pipe, FuriString* args, void* context) {
     furi_record_close(RECORD_BT);
 }
 
-CLI_COMMAND_INTERFACE(bt, execute, CliCommandFlagDefault, 1024, CLI_APPID);
+CLI_COMMAND_INTERFACE(bt, execute, CliCommandFlagDefault, 4 * 1024, CLI_APPID);

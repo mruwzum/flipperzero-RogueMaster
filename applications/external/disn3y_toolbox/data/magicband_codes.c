@@ -52,12 +52,12 @@ uint8_t magicband_preset_to_beacon_data(const char* hex, uint8_t* output) {
         hex_len++;
     }
 
-    // AD header: length, type, Disn3y specifier, E1 00
+    // AD header: length, type, Disney specifier, E1 00
     uint8_t pos = 0;
     output[pos++] = (uint8_t)(hex_len + 5); // AD length: 0xFF + 8301 + E100 + payload
     output[pos++] = 0xFF; // AD type: manufacturer specific
     output[pos++] = 0x83;
-    output[pos++] = 0x01; // Disn3y specifier
+    output[pos++] = 0x01; // Disney specifier
     output[pos++] = 0xE1;
     output[pos++] = 0x00; // Purpose unknown
 
@@ -316,7 +316,7 @@ static uint8_t magicband_code_generate_e905(const MagicBandCodeParams* params, u
     const uint8_t data[] = {
         0x0C, // AD length (12 bytes follow)
         0xFF, // AD type: manufacturer specific
-        0x83, // Disn3y specifier
+        0x83, // Disney specifier
         0x01,
         0xE1, // Purpose unknown
         0x00,
@@ -351,7 +351,7 @@ static uint8_t magicband_code_generate_e906(const MagicBandCodeParams* params, u
     const uint8_t data[] = {
         0x0E, // AD length (14 bytes follow)
         0xFF, // AD type: manufacturer specific
-        0x83, // Disn3y specifier
+        0x83, // Disney specifier
         0x01,
         0xE2, // Purpose unknown
         0x00,
@@ -389,7 +389,7 @@ static uint8_t magicband_code_generate_e908(const MagicBandCodeParams* params, u
     const uint8_t data[] = {
         0x10, // AD length (16 bytes follow)
         0xFF, // AD type: manufacturer specific
-        0x83, // Disn3y specifier
+        0x83, // Disney specifier
         0x01,
         0xE2, // Purpose unknown
         0x00,
@@ -430,7 +430,7 @@ static uint8_t magicband_code_generate_e909(const MagicBandCodeParams* params, u
     const uint8_t data[] = {
         0x10, // AD length (16 bytes follow)
         0xFF, // AD type: manufacturer specific
-        0x83, // Disn3y specifier
+        0x83, // Disney specifier
         0x01,
         0xE1, // Purpose unknown
         0x00,

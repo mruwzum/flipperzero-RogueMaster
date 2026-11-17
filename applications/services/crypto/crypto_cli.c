@@ -4,7 +4,7 @@
 #include <lib/toolbox/args.h>
 #include <toolbox/pipe.h>
 #include <cli/cli_main_commands.h>
-#include <toolbox/cli/cli_registry.h>
+#include <toolbox/cli/cli_command.h>
 #include <toolbox/cli/cli_ansi.h>
 
 void crypto_cli_print_usage(void) {
@@ -319,4 +319,4 @@ static void execute(PipeSide* pipe, FuriString* args, void* context) {
     furi_string_free(cmd);
 }
 
-CLI_COMMAND_INTERFACE(crypto, execute, CliCommandFlagDefault, 1024, CLI_APPID);
+CLI_COMMAND_INTERFACE(crypto, execute, CliCommandFlagDefault, 4 * 1024, CLI_APPID);

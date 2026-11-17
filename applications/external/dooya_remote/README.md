@@ -100,7 +100,7 @@ appears just left of the `Hold ... exit` hint.
 
 **Main menu**
 
-* **Load Remote**: open a saved remote or group from `/ext/dooya_remote`. A file
+* **Load Remote**: open a saved remote or group from `/ext/apps_data/dooya_remote`. A file
   with no serials is rejected. The app ships with a bundled `Defaults` remote that
   is copied into this folder on first launch, so there is always one entry to pick.
   Edit or delete it like any other; it is not restored once removed.
@@ -140,7 +140,7 @@ serial or a wildcard already in the list is rejected too, even a disabled one.
 
 ## File format
 
-Stored in `/ext/dooya_remote/<name>.dr`:
+Stored in `/ext/apps_data/dooya_remote/<name>.dr`:
 
 ```
 Filetype: Dooya Remote

@@ -25,10 +25,32 @@
 // one turns up with a different constant.
 #define KEELOQ_KEY_DISCRIMINATOR 0x2FFu
 
+// Phantom/Hiland (HCS300) discriminator. The hop's 12-bit discriminator field carries
+// serial & 0x3FF in its low 10 bits; the top 2 bits differ per remote and the receiver
+// ignores them, so the field as received is kept in generic.seed - like Monarch - and sent
+// back unchanged.
+#define KEELOQ_PHANTOM_HILAND_DISC_MASK   0xFFFu
+#define KEELOQ_PHANTOM_HILAND_SERIAL_MASK 0x3FFu
+
+// DEA Mio (HCS300) discriminator: serial & 0x3FF in the low 10 bits, the two OVR flags above
+// them. The encoder chip sets an OVR bit each time its counter wraps and never clears it, and
+// remotes turn up with the bits both set and both clear - a receiver ignores them, but a clone
+// standing in for an original should send what the original sends, so the field as received is
+// kept in generic.seed like Phantom/Hiland.
+#define KEELOQ_DEA_MIO_DISC_MASK   0xFFFu
+#define KEELOQ_DEA_MIO_SERIAL_MASK 0x3FFu
+// The only bits of the field the decoder matches, so the only ones that prove a remembered
+// discriminator belongs to this serial
+#define KEELOQ_DEA_MIO_MATCH_MASK  0x0FFu
+// Both OVR bits set - what a remote created from scratch gets, and what every capture this
+// was originally built from carried
+#define KEELOQ_DEA_MIO_OVR_SET     0xC00u
+
 /** Forced resync packs, counter mode 7 and up: the codes a DoorHan Smart clone sends,
  * taken off the air, one table per board family. Each entry is one frame - an offset on
  * the base counter, which wraps as the counter does so one table fits any base, and
- * whether it carries the real button code or button 0.
+ * whether it carries the real button code or button 0. A pack marked absolute holds the
+ * counters themselves instead, for a clone that ignores its own counter here.
  *
  * A receiver resyncs only on two transmissions with consecutive counters, so the offsets
  * come in consecutive pairs and no single frame can resync anything. Every hop between
@@ -48,6 +70,7 @@ typedef struct {
 typedef struct {
     const KeeloqResyncFrame* frames;
     uint8_t count;
+    bool absolute; //< counters are sent as they stand, not as offsets on the file counter
 } KeeloqResyncPack;
 
 // Oldest boards. Hops of 15998, the fourth cut short so the closing pair - two counters
@@ -79,10 +102,21 @@ static const KeeloqResyncFrame keeloq_resync_pack_cv01[] = {
     {1, true, 2},
 };
 
+// Phantom/Hiland clone remotes. One absolute pair and no walk: the clone ignores its own
+// counter here - the same remote sits in the low single digits in its normal mode - and
+// sends 0xFFFE then 0xFFFF, three frames each, inside a single press. That resyncs any
+// receiver holding a counter in the 32768 below 0xFFFE, which is the half of the space a
+// receiver that has drifted forward is in
+static const KeeloqResyncFrame keeloq_resync_pack_phantom[] = {
+    {0xFFFE, true, 3},
+    {0xFFFF, true, 3},
+};
+
 static const KeeloqResyncPack keeloq_resync_packs[] = {
-    {keeloq_resync_pack_old, COUNT_OF(keeloq_resync_pack_old)},
-    {keeloq_resync_pack_dhre, COUNT_OF(keeloq_resync_pack_dhre)},
-    {keeloq_resync_pack_cv01, COUNT_OF(keeloq_resync_pack_cv01)},
+    {keeloq_resync_pack_old, COUNT_OF(keeloq_resync_pack_old), false},
+    {keeloq_resync_pack_dhre, COUNT_OF(keeloq_resync_pack_dhre), false},
+    {keeloq_resync_pack_cv01, COUNT_OF(keeloq_resync_pack_cv01), false},
+    {keeloq_resync_pack_phantom, COUNT_OF(keeloq_resync_pack_phantom), true},
 };
 
 // First counter mode that sends a pack instead of stepping the counter
@@ -143,6 +177,32 @@ static inline uint32_t subghz_protocol_keeloq_te_nominal(uint32_t te) {
     return (te * 2 < KEELOQ_TE_FAST + (uint32_t)subghz_protocol_keeloq_const.te_short) ?
                KEELOQ_TE_FAST :
                (uint32_t)subghz_protocol_keeloq_const.te_short;
+}
+
+/** Phantom/Hiland hop discriminator
+ * @param serial Serial number (28bit)
+ * @param seed Discriminator as received, 0 if unknown
+ * @return seed if its low 10 bits belong to this serial, else serial & 0x3FF (12bit) */
+static inline uint16_t subghz_protocol_keeloq_phantom_hiland_disc(uint32_t serial, uint32_t seed) {
+    uint16_t disc = (uint16_t)seed & KEELOQ_PHANTOM_HILAND_DISC_MASK;
+    if((disc & KEELOQ_PHANTOM_HILAND_SERIAL_MASK) !=
+       (uint16_t)(serial & KEELOQ_PHANTOM_HILAND_SERIAL_MASK)) {
+        disc = (uint16_t)(serial & KEELOQ_PHANTOM_HILAND_SERIAL_MASK);
+    }
+    return disc;
+}
+
+/** DEA Mio hop discriminator
+ * @param serial Serial number (28bit)
+ * @param seed Discriminator as received, 0 if unknown
+ * @return seed if it belongs to this serial, else serial & 0x3FF with both OVR bits set (12bit) */
+static inline uint16_t subghz_protocol_keeloq_dea_mio_disc(uint32_t serial, uint32_t seed) {
+    uint16_t disc = (uint16_t)seed & KEELOQ_DEA_MIO_DISC_MASK;
+    if((seed == 0) ||
+       ((disc & KEELOQ_DEA_MIO_MATCH_MASK) != (uint16_t)(serial & KEELOQ_DEA_MIO_MATCH_MASK))) {
+        disc = (uint16_t)(serial & KEELOQ_DEA_MIO_SERIAL_MASK) | KEELOQ_DEA_MIO_OVR_SET;
+    }
+    return disc;
 }
 
 struct SubGhzProtocolDecoderKeeloq {
@@ -580,17 +640,25 @@ static bool subghz_protocol_keeloq_gen_data(
                     monarch_disc = KEELOQ_MONARCH_DISCRIMINATOR_A;
                 }
                 decrypt = btn << 28 | (uint32_t)monarch_disc << 16 | instance->generic.cnt;
+            } else if(strcmp(instance->manufacture_name, "Phantom_Hiland") == 0) {
+                // Phantom/Hiland -> 10 bit serial in hop, top 2 disc bits from seed -
+                // normal learning
+                decrypt = btn << 28 |
+                          (uint32_t)subghz_protocol_keeloq_phantom_hiland_disc(
+                              instance->generic.serial, instance->generic.seed)
+                              << 16 |
+                          instance->generic.cnt;
             } else if(strcmp(instance->manufacture_name, "KEY") == 0) {
                 // KEY -> no serial in hop, uses fixed value 0x2FF - simple learning
                 decrypt = btn << 28 | (KEELOQ_KEY_DISCRIMINATOR) << 16 | instance->generic.cnt;
             } else if(strcmp(instance->manufacture_name, "Dea_Mio") == 0) {
-                uint8_t first_disc_num = (instance->generic.serial >> 8) & 0xF;
-                uint8_t result_disc = (0xC + (first_disc_num % 4));
-                uint32_t dea_serial = (instance->generic.serial & 0xFF) |
-                                      (((uint32_t)result_disc) << 8);
-                decrypt = btn << 28 | (dea_serial & 0xFFF) << 16 | instance->generic.cnt;
-                // Dea_Mio -> modified serial in hop, uses last 3 digits modifying first one (example - 419 -> C19)
-                // (see formula in result_disc var) - simple learning
+                // Dea_Mio -> 10 bit serial in hop below the OVR bits, which are taken from the
+                // original remote when seed holds them - simple learning
+                decrypt = btn << 28 |
+                          (uint32_t)subghz_protocol_keeloq_dea_mio_disc(
+                              instance->generic.serial, instance->generic.seed)
+                              << 16 |
+                          instance->generic.cnt;
             }
             // Old type selector fixage for compatibilitiy with old signal files
             uint8_t kl_type_en = instance->keystore->kl_type;
@@ -899,7 +967,8 @@ static bool
         const uint16_t base_cnt = (uint16_t)instance->generic.cnt;
         instance->encoder.repeat = 1;
         for(uint8_t i = 0; i < pack->count; i++) {
-            instance->generic.cnt = (uint16_t)(base_cnt + pack->frames[i].offset);
+            instance->generic.cnt = pack->absolute ? pack->frames[i].offset :
+                                                     (uint16_t)(base_cnt + pack->frames[i].offset);
             const uint8_t frame_btn = pack->frames[i].real_btn ? btn : (uint8_t)0x00;
             for(uint8_t r = 0; r < pack->frames[i].repeat; r++) {
                 upindex = subghz_protocol_encoder_keeloq_encode_to_timings(
@@ -1269,6 +1338,45 @@ static inline bool subghz_protocol_keeloq_check_decrypt_monarch(
     return false;
 }
 
+// Phantom/Hiland specific check - match the 10 serial bits of the discriminator and keep
+// the whole field in seed, the top 2 bits are not derivable from the serial
+static inline bool subghz_protocol_keeloq_check_decrypt_phantom_hiland(
+    SubGhzBlockGeneric* instance,
+    uint32_t decrypt,
+    uint8_t btn,
+    uint32_t fix) {
+    furi_assert(instance);
+
+    uint16_t disc = ((uint16_t)(decrypt >> 16)) & KEELOQ_PHANTOM_HILAND_DISC_MASK;
+    if((decrypt >> 28 == btn) && ((disc & KEELOQ_PHANTOM_HILAND_SERIAL_MASK) ==
+                                  (uint16_t)(fix & KEELOQ_PHANTOM_HILAND_SERIAL_MASK))) {
+        instance->cnt = decrypt & 0x0000FFFF;
+        instance->seed = disc;
+        return true;
+    }
+    return false;
+}
+
+// DEA Mio specific check - matches the same 8 serial bits the generic check does, so nothing
+// that decoded before stops decoding, but keeps the whole discriminator in seed: the OVR bits
+// above the serial are not derivable from it
+static inline bool subghz_protocol_keeloq_check_decrypt_dea_mio(
+    SubGhzBlockGeneric* instance,
+    uint32_t decrypt,
+    uint8_t btn,
+    uint16_t end_serial) {
+    furi_assert(instance);
+
+    uint16_t disc = ((uint16_t)(decrypt >> 16)) & KEELOQ_DEA_MIO_DISC_MASK;
+    if((decrypt >> 28 == btn) &&
+       ((disc & KEELOQ_DEA_MIO_MATCH_MASK) == (end_serial & KEELOQ_DEA_MIO_MATCH_MASK))) {
+        instance->cnt = decrypt & 0x0000FFFF;
+        instance->seed = disc;
+        return true;
+    }
+    return false;
+}
+
 // KEY specific check - constant discriminator, same situation as Monarch
 static inline bool subghz_protocol_keeloq_check_decrypt_key(
     SubGhzBlockGeneric* instance,
@@ -1362,6 +1470,14 @@ static uint32_t subghz_protocol_keeloq_check_remote_controller_selector(
                             keystore->mfname = *manufacture_name;
                             return decrypt;
                         }
+                    } else if((strcmp(furi_string_get_cstr(manufacture_code->name), "Dea_Mio") ==
+                               0)) {
+                        if(subghz_protocol_keeloq_check_decrypt_dea_mio(
+                               instance, decrypt, btn, end_serial)) {
+                            *manufacture_name = furi_string_get_cstr(manufacture_code->name);
+                            keystore->mfname = *manufacture_name;
+                            return decrypt;
+                        }
                     } else {
                         if(subghz_protocol_keeloq_check_decrypt(
                                instance, decrypt, btn, end_serial)) {
@@ -1386,6 +1502,15 @@ static uint32_t subghz_protocol_keeloq_check_remote_controller_selector(
                     } else if((strcmp(furi_string_get_cstr(manufacture_code->name), "Monarch") ==
                                0)) {
                         if(subghz_protocol_keeloq_check_decrypt_monarch(instance, decrypt, btn)) {
+                            *manufacture_name = furi_string_get_cstr(manufacture_code->name);
+                            keystore->mfname = *manufacture_name;
+                            return decrypt;
+                        }
+                    } else if((strcmp(
+                                   furi_string_get_cstr(manufacture_code->name),
+                                   "Phantom_Hiland") == 0)) {
+                        if(subghz_protocol_keeloq_check_decrypt_phantom_hiland(
+                               instance, decrypt, btn, fix)) {
                             *manufacture_name = furi_string_get_cstr(manufacture_code->name);
                             keystore->mfname = *manufacture_name;
                             return decrypt;
@@ -1784,11 +1909,14 @@ SubGhzProtocolStatus subghz_protocol_decoder_keeloq_serialize(
     subghz_protocol_keeloq_check_remote_controller(
         &instance->generic, instance->keystore, &instance->manufacture_name);
 
-    // Monarch keeps its discriminator in seed, so it has to be saved like the BFT seed.
-    // Erreka needs its seed kept too, without it the hops cannot be rebuilt.
+    // Monarch, Phantom/Hiland and Dea_Mio keep their discriminator in seed, so it has to be
+    // saved like the BFT seed. Erreka needs its seed kept too, without it the hops cannot be
+    // rebuilt.
     if((strcmp(instance->manufacture_name, "BFT") == 0) ||
        (strcmp(instance->manufacture_name, "Erreka") == 0) ||
-       (strcmp(instance->manufacture_name, "Monarch") == 0)) {
+       (strcmp(instance->manufacture_name, "Monarch") == 0) ||
+       (strcmp(instance->manufacture_name, "Phantom_Hiland") == 0) ||
+       (strcmp(instance->manufacture_name, "Dea_Mio") == 0)) {
         uint8_t seed_data[sizeof(uint32_t)] = {0};
         for(size_t i = 0; i < sizeof(uint32_t); i++) {
             seed_data[sizeof(uint32_t) - i - 1] = (instance->generic.seed >> i * 8) & 0xFF;
@@ -2062,6 +2190,13 @@ void subghz_protocol_decoder_keeloq_get_string(void* context, FuriString* output
     hopdecrypt = subghz_protocol_keeloq_check_remote_controller(
         &instance->generic, instance->keystore, &instance->manufacture_name);
 
+    /* A half-rate frame is a Crypt Key remote: no manufacturer key in the keystore decrypts
+     * one, so the rate it arrived at is the only thing naming it. Display only - the branches
+     * below still switch on the real name, and the counter stays unreadable either way. */
+    const char* mf_display = (subghz_protocol_keeloq_te_nominal(instance->te) == KEELOQ_TE_FAST) ?
+                                 "Crypt Key" :
+                                 instance->manufacture_name;
+
     uint32_t code_found_hi = instance->generic.data >> 32;
     uint32_t code_found_lo = instance->generic.data & 0x00000000ffffffff;
 
@@ -2093,7 +2228,7 @@ void subghz_protocol_decoder_keeloq_get_string(void* context, FuriString* output
             instance->generic.cnt,
             code_found_reverse_lo,
             instance->generic.btn,
-            instance->manufacture_name);
+            mf_display);
     } else if(strcmp(instance->manufacture_name, "HCS101") == 0) {
         // Counter is present but not encrypted
         subghz_block_generic_global.cnt_is_available = true;
@@ -2114,7 +2249,7 @@ void subghz_protocol_decoder_keeloq_get_string(void* context, FuriString* output
             instance->generic.cnt,
             code_found_reverse_lo,
             instance->generic.btn,
-            instance->manufacture_name);
+            mf_display);
     } else if(
         (strcmp(instance->manufacture_name, "BFT") == 0) ||
         (strcmp(instance->manufacture_name, "Erreka") == 0)) {
@@ -2140,7 +2275,7 @@ void subghz_protocol_decoder_keeloq_get_string(void* context, FuriString* output
                 instance->generic.cnt,
                 code_found_reverse_lo,
                 instance->generic.btn,
-                instance->manufacture_name,
+                mf_display,
                 instance->generic.seed);
         } else {
             furi_string_cat_printf(
@@ -2158,9 +2293,33 @@ void subghz_protocol_decoder_keeloq_get_string(void* context, FuriString* output
                 instance->generic.cnt,
                 hopdecrypt,
                 instance->generic.btn,
-                instance->manufacture_name,
+                mf_display,
                 instance->generic.seed);
         }
+    } else if(
+        (strcmp(instance->manufacture_name, "Phantom_Hiland") == 0) ||
+        (strcmp(instance->manufacture_name, "Dea_Mio") == 0)) {
+        // Ds: the discriminator, whose top 2 bits are not derivable from the serial
+        subghz_block_generic_global.cnt_is_available = true;
+        subghz_block_generic_global.cnt_length_bit = 16;
+        subghz_block_generic_global.current_cnt = instance->generic.cnt;
+        furi_string_cat_printf(
+            output,
+            "%s %dbit\r\n"
+            "Key:%08lX%08lX\r\n"
+            "Fix:0x%08lX    Cnt:%04lX\r\n"
+            "Hop:0x%08lX    Btn:%01X\r\n"
+            "MF:%s Ds:%03lX",
+            instance->generic.protocol_name,
+            instance->generic.data_count_bit,
+            code_found_hi,
+            code_found_lo,
+            code_found_reverse_hi,
+            instance->generic.cnt,
+            hopdecrypt,
+            instance->generic.btn,
+            mf_display,
+            instance->generic.seed);
     } else if(strcmp(instance->manufacture_name, "Unknown") == 0) {
         // No counter info with unknown MF
         instance->generic.cnt = 0x0;
@@ -2179,7 +2338,7 @@ void subghz_protocol_decoder_keeloq_get_string(void* context, FuriString* output
             code_found_reverse_hi,
             code_found_reverse_lo,
             instance->generic.btn,
-            instance->manufacture_name);
+            mf_display);
     } else {
         // All other known MF with counter info, allow counter edit
         subghz_block_generic_global.cnt_is_available = true;
@@ -2200,6 +2359,6 @@ void subghz_protocol_decoder_keeloq_get_string(void* context, FuriString* output
             instance->generic.cnt,
             hopdecrypt,
             instance->generic.btn,
-            instance->manufacture_name);
+            mf_display);
     }
 }

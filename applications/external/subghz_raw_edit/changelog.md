@@ -1,8 +1,7 @@
 ## v1.8
 
+- Fixed Cut collapsing every gap longer than 32 ms in the whole capture.
 - Loading a non-RAW signal now offers a button picker for protocols that support custom buttons.
-- Allow merging without gaps (0ms gaps).
-- Fixed synchronization gap for static signals when merging.
 
 ## v1.7
 

@@ -18,13 +18,17 @@ ADD_SCENE(subghz, need_saving, NeedSaving)
 ADD_SCENE(subghz, rpc, Rpc)
 ADD_SCENE(subghz, show_gps, ShowGps)
 ADD_SCENE(subghz, signal_settings, SignalSettings)
+ADD_SCENE(subghz, signal_inspector, SignalInspector)
 #else
 ADD_SCENE(subghz, set_type, SetType)
+ADD_SCENE(subghz, set_freq, SetFreq)
 ADD_SCENE(subghz, set_key, SetKey)
 ADD_SCENE(subghz, set_serial, SetSerial)
 ADD_SCENE(subghz, set_button, SetButton)
 ADD_SCENE(subghz, set_counter, SetCounter)
 ADD_SCENE(subghz, set_seed, SetSeed)
+ADD_SCENE(subghz, set_te, SetTe)
+ADD_SCENE(subghz, set_gt, SetGt)
 #define SubGhzSceneStart SubGhzSceneSetType
 #endif
 ADD_SCENE(subghz, save_name, SaveName)

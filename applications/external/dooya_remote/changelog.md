@@ -1,3 +1,7 @@
+## v1.2
+
+- Move saved remotes to `/ext/apps_data/dooya_remote` (was the SD card root).
+
 ## v1.1
 
 - Add live overview of batch sending status.

@@ -24,7 +24,12 @@
 #include <lib/subghz/transmitter.h>
 #include <lib/subghz/receiver.h>
 #include <lib/subghz/subghz_protocol_registry.h>
+#ifndef FW_ORIGIN_Official
 #include <lib/subghz/blocks/custom_btn.h>
+#else
+// Official firmware has no custom buttons: always send the recorded button.
+#define SUBGHZ_CUSTOM_BTN_OK 0
+#endif
 
 #include "subghz_raw_edit_icons.h"
 
@@ -527,6 +532,10 @@ static FlipperFormat* fff_load_copy(Storage* storage, const char* path) {
 
 /* ---- Custom buttons ---------------------------------------------------- */
 
+static uint8_t g_custom_btn_id = SUBGHZ_CUSTOM_BTN_OK;
+
+#ifndef FW_ORIGIN_Official
+
 #define BTN_SLOTS     5
 #define BTN_LABEL_LEN 20
 
@@ -535,8 +544,6 @@ typedef struct {
     char protocol[32];
     char label[BTN_SLOTS][BTN_LABEL_LEN];
 } BtnPick;
-
-static uint8_t g_custom_btn_id = SUBGHZ_CUSTOM_BTN_OK;
 
 static void btn_extract_label(const char* info, char* out, size_t outlen) {
     out[0] = '\0';
@@ -644,6 +651,8 @@ static void btn_probe(Storage* storage, const char* path, const char* protocol, 
     subghz_custom_btn_set(SUBGHZ_CUSTOM_BTN_OK);
 }
 
+#endif // FW_ORIGIN_Official
+
 static bool synthesize_via_transmitter(
     Storage* storage,
     const char* path,
@@ -659,6 +668,7 @@ static bool synthesize_via_transmitter(
         subghz_environment_load_keystore(env, "/ext/subghz/assets/keeloq_mfcodes_user");
     }
 
+#ifndef FW_ORIGIN_Official
     if(g_custom_btn_id != SUBGHZ_CUSTOM_BTN_OK) {
         subghz_custom_btns_reset();
 
@@ -675,6 +685,7 @@ static bool synthesize_via_transmitter(
 
         subghz_custom_btn_set(g_custom_btn_id);
     }
+#endif
 
     FlipperFormat* fff = fff_load_copy(storage, path);
     SubGhzTransmitter* tx = NULL;
@@ -1289,6 +1300,7 @@ static bool cut_compact(App* a) {
     size_t n = a->sd.count;
     size_t w = 0;
     int32_t run = 0;
+    bool seam = false; // true once something was dropped before the current sample
     for(size_t i = 0; i < n; i++) {
         int32_t v = d[i];
         int32_t ad = iabs32(v);
@@ -1302,13 +1314,28 @@ static bool cut_compact(App* a) {
 
         if(s1 > hi) keep += s1 - (s0 > hi ? s0 : hi);
 
+        if(keep < ad) seam = true; // part (or all) of this sample falls inside A..B
+
         if(keep <= 0) continue;
 
         int32_t val = sign * keep;
-        if(w > 0 && ((d[w - 1] >= 0) == (val >= 0)))
-            d[w - 1] = (int16_t)clamp_dur((int32_t)d[w - 1] + val);
-        else
-            d[w++] = (int16_t)clamp_dur(val);
+        // Merge only across the cut seam. Consecutive same-sign samples elsewhere
+        // are long gaps split by push_duration() and must stay as they are.
+        if(seam && w > 0 && ((d[w - 1] >= 0) == (val >= 0))) {
+            int32_t sum = (int32_t)d[w - 1] + val;
+            if(iabs32(sum) <= DUR_CLAMP) {
+                d[w - 1] = (int16_t)sum;
+            } else {
+                // Keep the full duration: fill the previous sample, spill the rest.
+                // Safe in place: at most one extra sample, written at index <= i.
+                d[w - 1] = (int16_t)(sign * DUR_CLAMP);
+                d[w++] = (int16_t)(sum - sign * DUR_CLAMP);
+            }
+        } else {
+            d[w++] = (int16_t)val;
+        }
+
+        if(keep == ad && s0 >= hi) seam = false; // past the cut, back to verbatim copying
     }
 
     a->sd.count = w;
@@ -1555,6 +1582,8 @@ static void input_cb(InputEvent* e, void* ctx) {
 
 /* ---- Custom button picker UI ------------------------------------------- */
 
+#ifndef FW_ORIGIN_Official
+
 static void btn_pick_fit(Canvas* c, const char* s, int maxw, char* out, size_t outlen) {
     strncpy(out, s, outlen - 1);
     out[outlen - 1] = '\0';
@@ -1708,8 +1737,17 @@ static bool read_protocol(Storage* storage, const char* path, char* out, size_t 
     return true;
 }
 
+#endif // FW_ORIGIN_Official
+
 static bool btn_select_for_file(Gui* gui, Storage* storage, const char* path) {
     g_custom_btn_id = SUBGHZ_CUSTOM_BTN_OK;
+
+#ifdef FW_ORIGIN_Official
+    UNUSED(gui);
+    UNUSED(storage);
+    UNUSED(path);
+    return true;
+#else
     subghz_custom_btns_reset();
 
     char protocol[32] = {0};
@@ -1726,6 +1764,7 @@ static bool btn_select_for_file(Gui* gui, Storage* storage, const char* path) {
 
     g_custom_btn_id = (uint8_t)sel;
     return true;
+#endif
 }
 
 static void zoom(App* a, bool in) {

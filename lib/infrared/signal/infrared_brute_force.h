@@ -67,6 +67,10 @@ InfraredErrorCode infrared_brute_force_calculate_messages_ex(
  * This function must be called each time after setting the database via
  * a infrared_brute_force_set_db_filename() call.
  *
+ * Every signal in the database is read and validated, but only the ones whose name
+ * was registered via infrared_brute_force_add_record() are added to the dictionary.
+ * A database name with no matching record is skipped, which is not an error.
+ *
  * @param[in,out] brute_force pointer to the instance to be updated.
  * @returns InfraredErrorCodeNone on success, otherwise error code.
  */
@@ -155,6 +159,9 @@ void infrared_brute_force_add_record(
 
 /**
  * @brief Reset an InfraredBruteForce instance.
+ *
+ * Discards the dictionary and the database file name alike, so the instance must be
+ * configured via infrared_brute_force_set_db_filename() again before being reused.
  *
  * @param[in,out] brute_force pointer to the instance to be reset.
  */

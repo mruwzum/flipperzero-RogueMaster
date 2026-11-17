@@ -160,7 +160,7 @@ static Type4TagError type_4_tag_listener_iso_read(
         }
         const uint8_t* ndef_data = simple_array_cget_data(instance->data->ndef_data);
         bit_buffer_append_bytes(
-            instance->tx_buffer, &ndef_data[offset], MIN(ndef_file_len - offset, le));
+            instance->tx_buffer, &ndef_data[offset], MIN(ndef_file_len - offset, le)); //-V1111
         bit_buffer_append_bytes(
             instance->tx_buffer, type_4_tag_success_apdu, sizeof(type_4_tag_success_apdu));
         return Type4TagErrorNone;
@@ -350,7 +350,9 @@ Type4TagError
             }
         } else {
             bool extended_lc = false;
-            if(data[0] == 0) {
+            // Extended Lc needs 3 header bytes (00 + 2-byte length); require room
+            // so a 2-byte body can't over-read data[2] or underflow body_size.
+            if(data[0] == 0 && body_size >= 4) {
                 extended_lc = true;
                 lc = bit_lib_bytes_to_num_be(&data[1], sizeof(uint16_t));
                 data += 1 + sizeof(uint16_t);
@@ -399,7 +401,7 @@ Type4TagError
             iso14443_4a_listener_send_block(instance->iso14443_4a_listener, instance->tx_buffer);
 
         // Keep error flag to show unknown command on screen
-        if(error != Type4TagErrorCustomCommand) {
+        if(error != Type4TagErrorCustomCommand) { //-V1051
             error = type_4_tag_process_error(iso14443_4a_error);
         }
     }

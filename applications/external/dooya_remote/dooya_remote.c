@@ -26,10 +26,10 @@
 #include "dooya_remote_icons.h"
 
 #define APP_NAME    "Dooya Remote"
-#define APP_VERSION "1.1"
+#define APP_VERSION "1.2"
 #define APP_REPO    "github.com/Lechnio"
 
-#define APP_FOLDER    EXT_PATH("dooya_remote")
+#define APP_FOLDER    EXT_PATH("apps_data/dooya_remote")
 #define SUBGHZ_FOLDER EXT_PATH("subghz")
 #define FILE_EXT      ".dr"
 #define FILE_TYPE     "Dooya Remote"

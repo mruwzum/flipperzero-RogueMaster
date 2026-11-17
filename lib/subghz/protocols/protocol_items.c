@@ -94,6 +94,9 @@ const SubGhzProtocol* const subghz_protocol_registry_items[] = {
     &subghz_protocol_telcoma_edge,
     &subghz_protocol_cardin_s508,
     &subghz_protocol_freezer,
+    &subghz_protocol_faac_tm,
+    &subghz_protocol_proteco,
+    &subghz_protocol_belkorn,
 };
 
 const SubGhzProtocolRegistry subghz_protocol_registry = {
